@@ -1,0 +1,197 @@
+@import url("https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap");
+@import "tailwindcss";
+
+:root {
+  /* Same institutional palette as nueva.funca.edu.co and the internships platform. */
+  --background: #eef2fb;
+  --foreground: #262b34;
+}
+
+@theme {
+  --color-blue-950: #131c37;
+  --color-blue-900: #1e2e55;
+  --color-blue-800: #263e80;
+  --color-blue-700: #2e4c9c;
+  --color-blue-600: #4560b4;
+  --color-blue-500: #667bc9;
+  --color-blue-400: #93a4dd;
+  --color-blue-300: #bcc7ec;
+  --color-blue-200: #dbe1f5;
+  --color-blue-100: #e6ebf9;
+  --color-blue-50: #f3f6fd;
+  --color-gold-700: #a87b00;
+  --color-gold-600: #e0a500;
+  --color-gold-500: #fbba00;
+  --color-gold-400: #febf1f;
+  --color-gold-100: #fff1c7;
+  --color-gold-50: #fffaeb;
+  /* Projection screen (Day of the Dead): night, marigold and papel picado accents. */
+  --color-noche-700: #2a1446;
+  --color-noche-800: #1d1035;
+  --color-noche-900: #120b26;
+  --color-noche-950: #08061a;
+  --color-cempasuchil-400: #ffba08;
+  --color-cempasuchil-500: #faa307;
+  --color-cempasuchil-600: #f48c06;
+  --color-rosa-400: #ff4fa8;
+  --color-turquesa-400: #2dd4bf;
+  --font-heading: "Poppins", sans-serif;
+  --font-body: "Inter", sans-serif;
+}
+
+@custom-variant short (@media (max-height: 640px));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-body);
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+}
+
+/* ---------- FUNCA visual system (same utilities as the internships platform) ---------- */
+@utility eyebrow {
+  @apply inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.18em] text-blue-800;
+  &::before {
+    content: "";
+    @apply block h-0.5 w-6 rounded-full bg-gold-500;
+  }
+}
+@utility page-title {
+  @apply font-heading text-2xl sm:text-3xl font-extrabold text-blue-900 tracking-tight;
+}
+@utility card {
+  @apply rounded-3xl bg-white border border-blue-200 shadow-[0_1px_2px_rgba(30,46,85,0.04)];
+}
+@utility card-sm {
+  @apply rounded-2xl bg-white border border-blue-200;
+}
+@utility card-action {
+  @apply rounded-3xl bg-white border border-blue-200 p-5 text-left transition-all hover:-translate-y-0.5 hover:border-blue-400 hover:shadow-[0_12px_30px_-12px_rgba(30,46,85,0.25)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700;
+}
+@utility btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-full px-5 py-2.5 text-sm font-semibold font-heading transition-colors disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700;
+}
+@utility btn-cta {
+  @apply btn bg-gold-500 text-blue-900 hover:bg-gold-400 shadow-[0_8px_20px_-8px_rgba(251,186,0,0.7)];
+}
+@utility btn-primary {
+  @apply btn bg-blue-800 text-white hover:bg-blue-900;
+}
+@utility btn-secondary {
+  @apply btn border-2 border-blue-800 text-blue-800 bg-white hover:bg-blue-50;
+}
+@utility btn-soft {
+  @apply btn bg-blue-100 text-blue-800 hover:bg-blue-200;
+}
+@utility btn-danger {
+  @apply btn bg-red-50 text-red-700 hover:bg-red-100;
+}
+@utility pill {
+  @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold;
+}
+
+/* ---------- Specific to the administrative platform ---------- */
+/* Form fields: same stroke as the internships login. */
+@utility field {
+  @apply w-full rounded-2xl border border-blue-200 bg-blue-50/50 px-4 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-700 focus:bg-white disabled:opacity-60;
+}
+/* Dropdowns: no native arrow; custom chevron, more spacing and hover/focus like the other fields. */
+select.field {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23263e80' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M4 6l4 4 4-4'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 0.85rem center;
+  background-size: 1rem;
+  padding-right: 2.6rem;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;
+}
+select.field:hover:not(:disabled) {
+  border-color: var(--color-blue-400);
+  background-color: #fff;
+}
+select.field:focus {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23263e80' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M4 10l4-4 4 4'/></svg>");
+}
+select.field:disabled {
+  cursor: not-allowed;
+}
+select.field option {
+  color: var(--color-slate-800, #1e293b);
+  background: #fff;
+  padding: 0.5rem 0.75rem;
+}
+select.field option:checked {
+  background: var(--color-blue-100);
+  color: var(--color-blue-900);
+  font-weight: 600;
+}
+/* Compact selects (toolbar filters): same chevron, less padding. */
+select.field.py-1\.5,
+select.field.py-1 {
+  background-position: right 0.7rem center;
+  padding-right: 2.2rem;
+}
+
+@utility field-label {
+  @apply block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5;
+}
+/* Large field for the barcode reader: visible from afar and with a clear focus state. */
+@utility field-scanner {
+  @apply w-full rounded-2xl border-2 border-dashed border-blue-300 bg-white px-5 py-4 font-mono text-lg tracking-wider text-blue-900 placeholder:font-body placeholder:text-base placeholder:tracking-normal placeholder:text-slate-400 focus:outline-none focus:border-solid focus:border-gold-500 focus:ring-4 focus:ring-gold-500/25;
+}
+@utility data-table {
+  @apply w-full text-sm;
+  thead th {
+    @apply px-4 py-2.5 text-left text-[11px] font-bold uppercase tracking-wider text-slate-500 border-b border-blue-200 bg-blue-50/60;
+  }
+  tbody td {
+    @apply px-4 py-3 border-b border-blue-100 align-middle;
+  }
+  tbody tr:last-child td {
+    @apply border-b-0;
+  }
+  tbody tr:hover td {
+    @apply bg-blue-50/40;
+  }
+  /* On phones the table stacks: each row becomes a card and each cell shows its label. */
+  @media (max-width: 639px) {
+    thead {
+      @apply hidden;
+    }
+    &, tbody, tr, td {
+      @apply block;
+    }
+    tbody tr {
+      @apply border-b border-blue-100 px-4 py-3;
+    }
+    tbody tr:last-child {
+      @apply border-b-0;
+    }
+    tbody td {
+      @apply border-0 px-0 py-1;
+    }
+    tbody td:empty {
+      @apply hidden;
+    }
+    tbody td[data-t]::before {
+      content: attr(data-t);
+      @apply mr-2 text-[10px] font-bold uppercase tracking-wider text-slate-400;
+    }
+    tbody td.text-right {
+      @apply text-left pt-2;
+    }
+    tbody tr:hover td {
+      @apply bg-transparent;
+    }
+  }
+}
