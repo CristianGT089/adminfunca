@@ -1,0 +1,21 @@
+/node_modules
+/.next/
+/out/
+/build
+/coverage
+.DS_Store
+*.pem
+npm-debug.log*
+pnpm-debug.log*
+.env*
+!.env.example
+*.tsbuildinfo
+next-env.d.ts
+docker-compose.override.yml
+.claude/
+.agents/
+
+# curl cookie jars from manual API testing (they contain session tokens)
+/c[0-9a-z]
+*.cookies
+cookies*.txt
