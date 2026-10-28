@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin_funca
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}
+      POSTGRES_DB: admin_funca
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - admin_funca_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin_funca -d admin_funca"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://admin_funca:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}@db:5432/admin_funca?schema=public
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in your .env before deploying}
+      DATA_KEY: ${DATA_KEY:?Set DATA_KEY in your .env before deploying}
+      APP_URL: ${APP_URL:-}
+      SMTP_URL: ${SMTP_URL:-}
+      MAIL_FROM: ${MAIL_FROM:-FUNCA Bienestar <no-responder@funca.edu.co>}
+      MAIL_DOMAINS: ${MAIL_DOMAINS:-funca.edu.co}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+    ports:
+      - "127.0.0.1:${APP_PORT:-3020}:3000"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.next/cache
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  admin_funca_pgdata:

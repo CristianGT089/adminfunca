@@ -1,0 +1,16 @@
+node_modules
+.next
+.git
+.env
+.env.*
+*.md
+.DS_Store
+tests
+docs
+*.tsbuildinfo
+next-env.d.ts
+docker-compose*.yml
+# curl cookie jars (they contain session tokens)
+c[0-9a-z]
+*.cookies
+cookies*.txt
