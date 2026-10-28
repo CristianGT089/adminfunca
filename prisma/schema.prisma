@@ -1,0 +1,556 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Conventions: models in PascalCase and fields in camelCase in code; tables (plural) and
+// columns in snake_case in the database (@@map / @map). Enum values in English.
+
+// ---------------------------------------------------------------------------------------
+// Core: platform users (administrative staff), sessions and audit log.
+// What each role can do lives in src/lib/core/permissions.ts; the database only stores the
+// role. New role = one enum entry + its row in the permission matrix.
+// ---------------------------------------------------------------------------------------
+
+enum Role {
+  ADMIN // IT: everything, including account management
+  ACADEMIC_COORDINATION
+  ADMINISTRATIVE_COORDINATION
+  ADMINISTRATIVE_ASSISTANT
+  PSYCHOLOGY // handles consultation requests; sees only their own schedule and cases
+  INTERNSHIP_COORDINATION // schedules and closes field trips / internship visits
+
+  @@map("role")
+}
+
+model User {
+  id                 String    @id @default(cuid())
+  name               String
+  username           String    @unique
+  passwordHash       String    @map("password_hash")
+  role               Role      @default(ADMINISTRATIVE_ASSISTANT)
+  active             Boolean   @default(true)
+  // When the account is created or the password reset, it must be changed on next login.
+  mustChangePassword Boolean   @default(true) @map("must_change_password")
+  // Temporary lockout after several failed login attempts.
+  failedAttempts     Int       @default(0) @map("failed_attempts")
+  lockedUntil        DateTime? @map("locked_until")
+  // Bumped when the password is changed or reset, the role changes or the account is
+  // deactivated: sessions signed with an older version stop being valid.
+  sessionVersion     Int       @default(0) @map("session_version")
+  lastLoginAt        DateTime? @map("last_login_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  createdById  String? @map("created_by_id")
+  createdBy    User?   @relation("CreatedUsers", fields: [createdById], references: [id], onDelete: SetNull)
+  createdUsers User[]  @relation("CreatedUsers")
+
+  // Person the account belongs to (psychologist, internship coordinator…): their schedule
+  // entries are recorded under that person and count towards payroll.
+  personId String? @unique @map("person_id")
+  person   Person? @relation(fields: [personId], references: [id], onDelete: SetNull)
+
+  auditLogs          AuditLog[]
+  createdEvents      Event[]
+  closedEvents       Event[]               @relation("EventClosedBy")
+  registeredRequests ConsultationRequest[] @relation("RequestRegisteredBy")
+  assignedRequests   ConsultationRequest[] @relation("RequestAssignedTo")
+  registeredLoans    Loan[]                @relation("LoanRegisteredBy")
+  returnedLoans      Loan[]                @relation("LoanReturnedBy")
+  reportedIssues     LoanIssue[]
+
+  @@map("users")
+}
+
+// Who did what and when. Written by the server on every sensitive operation (login,
+// viewing/editing people, loans…). Never deleted or edited.
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?  @map("user_id")
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String // e.g. "auth.login", "people.view", "inventory.loan"
+  entity    String? // affected model ("Person", "Item", "Loan", "User")
+  entityId  String?  @map("entity_id")
+  details   Json? // non-sensitive data about the change (never documents or phones in clear text)
+  ip        String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@index([entity, entityId])
+  @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------------------
+// Inventory: people who receive items, items and loans.
+// ---------------------------------------------------------------------------------------
+
+enum PersonType {
+  STUDENT
+  TEACHER
+  STAFF
+  EXTERNAL
+
+  @@map("person_type")
+}
+
+// A person who can receive an item. Minimal, protected personal data:
+// - The document number is NOT stored in clear text: `documentHash` (HMAC with DATA_KEY) is
+//   used to search by document or ID card; `documentEncrypted` (AES-256-GCM) lets authorized
+//   users see it; `documentLast4` identifies the person in lists without exposing it.
+// - The phone is encrypted too. Name and program are stored in clear text.
+model Person {
+  id                String     @id @default(cuid())
+  type              PersonType @default(STUDENT)
+  firstNames        String     @map("first_names")
+  lastNames         String     @map("last_names")
+  documentType      String     @default("CC") @map("document_type") // CC, TI, CE, PA, PEP…
+  documentHash      String     @unique @map("document_hash")
+  documentEncrypted String     @map("document_encrypted")
+  documentLast4     String     @map("document_last4")
+  // What the ID card barcode / QR encodes. If the card prints the document number, lookup
+  // goes through `documentHash`; if it prints its own code, through this field.
+  cardCode          String?    @unique @map("card_code")
+  program           String? // program or area (e.g. "Técnico en Enfermería", "Secretaría")
+  email             String?
+  phoneEncrypted    String?    @map("phone_encrypted")
+  // Base hourly rate for payroll (COP). A schedule entry can set its own.
+  hourlyRate        Int?       @map("hourly_rate")
+  active            Boolean    @default(true)
+  createdAt         DateTime   @default(now()) @map("created_at")
+  updatedAt         DateTime   @updatedAt @map("updated_at")
+
+  loans                Loan[]
+  // TEACHER only: the academic modules they teach.
+  teachingModules      TeacherModule[]
+  events               Event[]
+  user                 User?
+  consultationRequests ConsultationRequest[]
+  payrollItems         PayrollItem[]
+
+  @@index([lastNames, firstNames])
+  @@map("people")
+}
+
+// ---------------------------------------------------------------------------------------
+// Academic: modules (subjects) and which teacher teaches each one. Basis of teacher payroll.
+// ---------------------------------------------------------------------------------------
+
+model AcademicModule {
+  id        String   @id @default(cuid())
+  name      String
+  program   String // e.g. "Técnico en Enfermería"
+  hours     Int? // reference number of hours
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  teachers TeacherModule[]
+  events   Event[]
+
+  @@unique([program, name])
+  @@map("academic_modules")
+}
+
+model TeacherModule {
+  personId  String         @map("person_id")
+  person    Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
+  moduleId  String         @map("module_id")
+  module    AcademicModule @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  createdAt DateTime       @default(now()) @map("created_at")
+
+  @@id([personId, moduleId])
+  @@map("teacher_modules")
+}
+
+enum ItemStatus {
+  AVAILABLE
+  LOANED
+  MAINTENANCE
+  RETIRED
+
+  @@map("item_status")
+}
+
+model Item {
+  id          String     @id @default(cuid())
+  // What the item's label / barcode encodes. Unique.
+  code        String     @unique
+  name        String
+  category    String? // e.g. "Equipo de cómputo", "Simulación", "Mobiliario"
+  description String?
+  brand       String?
+  serial      String?
+  location    String? // campus / room / shelf
+  campus      String? // "Bogotá" | "Itagüí"
+  status      ItemStatus @default(AVAILABLE)
+  notes       String?
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  loans Loan[]
+
+  @@index([name])
+  @@index([status])
+  @@map("items")
+}
+
+enum ReturnCondition {
+  GOOD
+  DAMAGED
+  INCOMPLETE
+
+  @@map("return_condition")
+}
+
+// An item handed to a person and, when it happens, its return.
+// An item has at most one open loan (returnedAt == null).
+model Loan {
+  id       String @id @default(cuid())
+  itemId   String @map("item_id")
+  item     Item   @relation(fields: [itemId], references: [id])
+  personId String @map("person_id")
+  person   Person @relation(fields: [personId], references: [id])
+
+  deliveredAt    DateTime  @default(now()) @map("delivered_at")
+  registeredById String    @map("registered_by_id")
+  registeredBy   User      @relation("LoanRegisteredBy", fields: [registeredById], references: [id])
+  notes          String?
+  // Expected return date (optional; when overdue it shows up in alerts).
+  dueAt          DateTime? @map("due_at")
+
+  returnedAt      DateTime?        @map("returned_at")
+  returnedById    String?          @map("returned_by_id")
+  returnedBy      User?            @relation("LoanReturnedBy", fields: [returnedById], references: [id])
+  returnCondition ReturnCondition? @map("return_condition")
+  returnNote      String?          @map("return_note")
+
+  issues LoanIssue[]
+
+  @@index([itemId, returnedAt])
+  @@index([personId, returnedAt])
+  @@index([deliveredAt])
+  @@map("loans")
+}
+
+enum IssueType {
+  DEFECT // received with damage or a fault
+  MISSING_PART // an accessory or part is missing
+  DAMAGED_IN_USE // got damaged while the person had it
+  OTHER
+
+  @@map("issue_type")
+}
+
+// What the person reports about the item after receiving it (e.g. "the laptop doesn't turn
+// on"). The time since delivery is recorded: if it is short, the damage was already there.
+model LoanIssue {
+  id                   String    @id @default(cuid())
+  loanId               String    @map("loan_id")
+  loan                 Loan      @relation(fields: [loanId], references: [id])
+  type                 IssueType @default(DEFECT)
+  description          String
+  reportedAt           DateTime  @default(now()) @map("reported_at")
+  // Minutes between delivery and the report, computed when registered (fixed in history).
+  minutesSinceDelivery Int       @map("minutes_since_delivery")
+  registeredById       String    @map("registered_by_id")
+  registeredBy         User      @relation(fields: [registeredById], references: [id])
+
+  @@index([loanId])
+  @@map("loan_issues")
+}
+
+// ---------------------------------------------------------------------------------------
+// Academic schedule: everything a teacher does that gets paid comes from here (module
+// classes, courses, diplomas, field trips, psychology sessions). Payroll sums these events.
+// ---------------------------------------------------------------------------------------
+
+enum EventType {
+  MODULE_CLASS // class of an academic module
+  COURSE // continuing education
+  DIPLOMA
+  FIELD_TRIP // field trip / visit (apprenticeship contracts, internships)
+  PSYCHOLOGY_SESSION
+  OTHER
+
+  @@map("event_type")
+}
+
+enum Modality {
+  IN_PERSON
+  VIRTUAL
+
+  @@map("modality")
+}
+
+// Closing of an activity that already started (recorded by whoever did it or by coordination).
+enum Completion {
+  COMPLETED
+  NOT_COMPLETED // scheduled but did not happen (student absent, company cancelled…)
+  CANCELLED // does not count towards payroll
+
+  @@map("completion")
+}
+
+// Standard module timetables. See src/lib/modules/schedule/shifts.ts.
+enum Shift {
+  DAYTIME // Tuesday, Wednesday and Thursday, 7:00 to 12:00
+  EVENING // Monday to Friday, 18:00 to 21:00
+  SATURDAY // Saturdays, 7:00 to 16:00
+
+  @@map("shift")
+}
+
+model Event {
+  id           String    @id @default(cuid())
+  type         EventType @default(MODULE_CLASS)
+  shift        Shift?
+  title        String
+  description  String?
+  startsAt     DateTime  @map("starts_at")
+  endsAt       DateTime  @map("ends_at")
+  // Hours to pay. Defaults to the difference between start and end; can be adjusted.
+  hours        Float
+  modality     Modality  @default(IN_PERSON)
+  campus       String?
+  location     String? // room or address; for virtual events, the meeting link
+  // Students in charge during the session (for variable pay).
+  studentCount Int?      @map("student_count")
+  // Whether it counts towards the teacher's payroll.
+  payable      Boolean   @default(true)
+  // Hourly rate for this entry (COP). Required for courses: each teacher is paid according
+  // to their profile. When null the person's base rate is used.
+  hourlyRate   Int?      @map("hourly_rate")
+  // Groups the sessions created as one series (e.g. weekly classes of a module).
+  seriesId     String?   @map("series_id")
+
+  teacherId String?         @map("teacher_id")
+  teacher   Person?         @relation(fields: [teacherId], references: [id], onDelete: SetNull)
+  moduleId  String?         @map("module_id")
+  module    AcademicModule? @relation(fields: [moduleId], references: [id], onDelete: SetNull)
+
+  completion  Completion?
+  closingNote String?     @map("closing_note")
+  closedAt    DateTime?   @map("closed_at")
+  closedById  String?     @map("closed_by_id")
+  closedBy    User?       @relation("EventClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
+
+  // Psychology request that originated this entry (if any).
+  consultationRequest ConsultationRequest?
+
+  createdById String?  @map("created_by_id")
+  createdBy   User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([startsAt, endsAt])
+  @@index([teacherId, startsAt])
+  @@index([seriesId])
+  @@map("events")
+}
+
+// ---------------------------------------------------------------------------------------
+// Psychology: consultation requests. They arrive through the public link (students or staff,
+// with a verified institutional email) or are registered by administrative staff. Any
+// psychologist takes it, agrees on a time with the person and schedules it (creating the
+// schedule entry). After the session they record the feedback.
+// Document, phone, reason and observations are encrypted.
+// ---------------------------------------------------------------------------------------
+
+enum RequestStatus {
+  PENDING_VERIFICATION // public link: institutional email not confirmed yet
+  PENDING // received, no psychologist has taken it
+  TAKEN // a psychologist took it and is contacting the person
+  SCHEDULED // has a date and time in the schedule
+  ATTENDED
+  REFERRED // attended and referred (EPS, crisis line, medical…)
+  NO_SHOW
+  CANCELLED
+
+  @@map("request_status")
+}
+
+enum RequestOrigin {
+  PUBLIC
+  INTERNAL // registered by staff from the platform
+  FOLLOW_UP // created by the psychologist as a continuation of a case
+
+  @@map("request_origin")
+}
+
+enum Attendance {
+  ATTENDED
+  NO_SHOW
+  CANCELLED
+
+  @@map("attendance")
+}
+
+enum Referral {
+  NONE
+  EPS
+  CRISIS_LINE
+  MEDICAL
+  OTHER
+
+  @@map("referral")
+}
+
+enum ConsultationReason {
+  ACADEMIC
+  FAMILY
+  EMOTIONAL
+  SUBSTANCE_USE
+  OTHER
+
+  @@map("consultation_reason")
+}
+
+model ConsultationRequest {
+  id     String        @id @default(cuid())
+  number Int           @unique @default(autoincrement())
+  status RequestStatus @default(PENDING)
+  origin RequestOrigin @default(INTERNAL)
+
+  // Who is requesting
+  requesterType     PersonType @default(STUDENT) @map("requester_type")
+  firstNames        String     @map("first_names")
+  lastNames         String     @map("last_names")
+  documentType      String     @default("CC") @map("document_type")
+  documentHash      String     @map("document_hash") // HMAC: monthly request limit and search
+  documentEncrypted String     @map("document_encrypted")
+  documentLast4     String     @map("document_last4")
+  phoneEncrypted    String     @map("phone_encrypted")
+  email             String
+  program           String?
+  campus            String?
+  preferredModality Modality?  @map("preferred_modality")
+  availability      String? // time slots when the person can be called / attended
+  reasonEncrypted   String?    @map("reason_encrypted") // what the person says when asking
+  personId          String?    @map("person_id")
+  person            Person?    @relation(fields: [personId], references: [id], onDelete: SetNull)
+
+  // Personal data processing consent (Colombian Law 1581 of 2012)
+  policyVersion    String   @map("policy_version")
+  policyAcceptedAt DateTime @map("policy_accepted_at")
+
+  // Institutional email verification (public link only). Only the token hash is stored.
+  tokenHash       String?   @unique @map("token_hash")
+  tokenExpiresAt  DateTime? @map("token_expires_at")
+  emailVerifiedAt DateTime? @map("email_verified_at")
+
+  registeredById String?   @map("registered_by_id")
+  registeredBy   User?     @relation("RequestRegisteredBy", fields: [registeredById], references: [id], onDelete: SetNull)
+  assignedToId   String?   @map("assigned_to_id")
+  assignedTo     User?     @relation("RequestAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  takenAt        DateTime? @map("taken_at")
+  eventId        String?   @unique @map("event_id")
+  event          Event?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  // Case this one follows up on
+  previousId     String?   @map("previous_id")
+
+  // Psychologist's feedback (after the appointment time)
+  attendance           Attendance?
+  referral             Referral?
+  reasonCategory       ConsultationReason? @map("reason_category")
+  needsFollowUp        Boolean             @default(false) @map("needs_follow_up")
+  followUpDate         DateTime?           @map("follow_up_date")
+  observationEncrypted String?             @map("observation_encrypted")
+  closedAt             DateTime?           @map("closed_at")
+  cancellationReason   String?             @map("cancellation_reason")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@index([documentHash, createdAt])
+  @@index([assignedToId, status])
+  @@map("consultation_requests")
+}
+
+// ---------------------------------------------------------------------------------------
+// Payroll: one period per month. Hours come from the schedule; academic coordination checks
+// each person against the requirements and approves the month, and administrative
+// coordination records the payment. On approval the amounts are frozen.
+// ---------------------------------------------------------------------------------------
+
+enum PayrollPeriodStatus {
+  OPEN // the month is in progress or activities are still being recorded
+  IN_REVIEW
+  APPROVED // ready to pay; amounts frozen
+  PAID
+
+  @@map("payroll_period_status")
+}
+
+enum PayrollItemStatus {
+  PENDING
+  FLAGGED // something is missing or there is a discrepancy
+  VERIFIED
+  PAID
+
+  @@map("payroll_item_status")
+}
+
+model PayrollPeriod {
+  id           String              @id @default(cuid())
+  year         Int
+  month        Int
+  status       PayrollPeriodStatus @default(OPEN)
+  notes        String?
+  inReviewAt   DateTime?           @map("in_review_at")
+  approvedAt   DateTime?           @map("approved_at")
+  approvedById String?             @map("approved_by_id")
+  paidAt       DateTime?           @map("paid_at")
+  createdAt    DateTime            @default(now()) @map("created_at")
+  updatedAt    DateTime            @updatedAt @map("updated_at")
+
+  items PayrollItem[]
+
+  @@unique([year, month])
+  @@map("payroll_periods")
+}
+
+model PayrollItem {
+  id               String            @id @default(cuid())
+  periodId         String            @map("period_id")
+  period           PayrollPeriod     @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  personId         String            @map("person_id")
+  person           Person            @relation(fields: [personId], references: [id], onDelete: Restrict)
+  status           PayrollItemStatus @default(PENDING)
+  // Summary computed from the schedule: { hoursByType: {MODULE_CLASS: 12, …}, events, withoutRate, withoutClosing }
+  calculation      Json
+  hours            Float
+  amount           Int
+  // Requirements checked by hand: { confirmation: true, invoice: false, … }
+  requirements     Json              @default("{}")
+  observation      String?
+  verifiedAt       DateTime?         @map("verified_at")
+  verifiedById     String?           @map("verified_by_id")
+  paidAt           DateTime?         @map("paid_at")
+  paymentReference String?           @map("payment_reference")
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+
+  @@unique([periodId, personId])
+  @@map("payroll_items")
+}
+
+// ---------------------------------------------------------------------------------------
+// Projection: event screen (Day of the Dead) playing a YouTube playlist. A single row
+// (id = 1): the screen polls it every few seconds and updates itself when it changes.
+// ---------------------------------------------------------------------------------------
+
+model Projection {
+  id        Int      @id @default(1)
+  // One or more YouTube links (a playlist, or videos one per line).
+  links     String   @default("")
+  shuffle   Boolean  @default(false)
+  updatedBy String?  @map("updated_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("projections")
+}
