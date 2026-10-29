@@ -5,7 +5,7 @@ import { projectionSchema } from "@/lib/modules/projection/schemas";
 import { getProjection, saveProjection } from "@/lib/modules/projection/service";
 
 // The screen polls this every few seconds to pick up changes to the playlist.
-export const GET = withPermission("projection.manage", async () => {
+export const GET = withPermission("projection.view", async () => {
   return NextResponse.json({ projection: await getProjection() });
 });
 

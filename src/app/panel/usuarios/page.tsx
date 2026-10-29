@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import type { Role } from "@prisma/client";
 import { request, useSession } from "@/components/core/useSession";
 import { Alert, PageHeader, Field, CopyButton, formatDate, Modal, Empty } from "@/components/core/ui";
 import Selector from "@/components/core/Selector";
-import { ROLE_NAME, PERMISSIONS, PERMISSIONS_BY_ROLE, ROLES, PROFESSIONAL_ROLES } from "@/lib/core/permissions";
+import { ROLE_NAME, PERMISSION_GROUPS, PERMISSIONS_BY_ROLE, ROLES, PROFESSIONAL_ROLES, hasPermission, moduleAccess, type Access } from "@/lib/core/permissions";
 import { DOCUMENT_TYPES } from "@/lib/modules/inventory/schemas";
 
 type UserRow = {
@@ -20,32 +20,6 @@ type UserRow = {
   lockedUntil: string | null;
   createdBy: { id: string; name: string } | null;
   person: { id: string; firstNames: string; lastNames: string; documentLast4: string } | null;
-};
-
-const PERMISSION_DESCRIPTION: Record<string, string> = {
-  "users.view": "Ver cuentas",
-  "users.manage": "Crear y editar cuentas",
-  "audit.view": "Ver auditoría",
-  "inventory.view": "Ver inventario",
-  "inventory.loan": "Entregar y recibir elementos",
-  "inventory.items.manage": "Crear y editar elementos",
-  "inventory.people.view": "Ver personas",
-  "inventory.people.manage": "Crear y editar personas",
-  "inventory.people.viewDocument": "Ver documento completo",
-  "inventory.reports": "Exportar reportes",
-  "payroll.view": "Ver horas y nómina del mes",
-  "payroll.manage": "Revisar requisitos, tarifas y aprobar la nómina",
-  "payroll.pay": "Registrar pagos de la nómina",
-  "teachers.view": "Ver docentes",
-  "teachers.manage": "Crear y editar docentes",
-  "modules.manage": "Gestionar módulos académicos",
-  "schedule.view": "Ver agenda académica",
-  "schedule.manage": "Registrar en la agenda (todo)",
-  "schedule.fieldTrips": "Programar prácticas / salidas",
-  "schedule.own": "Mi agenda (cuenta vinculada a una persona)",
-  "psychology.view": "Ver estado de solicitudes de psicología",
-  "psychology.request": "Registrar solicitudes de cita",
-  "psychology.attend": "Atender citas (datos clínicos)",
 };
 
 export default function UsersPage() {
@@ -299,35 +273,119 @@ export default function UsersPage() {
         )}
       </Modal>
 
-      <Modal title="Permisos por rol" open={showRoles} onClose={() => setShowRoles(false)} width="max-w-4xl">
-        <div className="overflow-x-auto">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Permiso</th>
-                {ROLES.map((r) => (
-                  <th key={r} className="text-center">
-                    {ROLE_NAME[r]}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {PERMISSIONS.map((p) => (
-                <tr key={p}>
-                  <td>{PERMISSION_DESCRIPTION[p] ?? p}</td>
-                  {ROLES.map((r) => (
-                    <td key={r} className="text-center">
-                      {PERMISSIONS_BY_ROLE[r].includes(p) ? <span className="text-emerald-600 font-bold">✓</span> : <span className="text-slate-300">—</span>}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p className="mt-3 text-xs text-slate-400">La matriz se define en el código (src/lib/core/permissions.ts); cambiarla requiere un despliegue.</p>
+      <Modal title="Permisos por rol" open={showRoles} onClose={() => setShowRoles(false)} width="max-w-5xl">
+        <RoleMatrix />
       </Modal>
     </>
+  );
+}
+
+const ACCESS_PILL: Record<Access, { text: string; className: string }> = {
+  write: { text: "Escritura", className: "bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300" },
+  read: { text: "Lectura", className: "bg-blue-100 text-blue-800 ring-1 ring-blue-200" },
+};
+
+function AccessPill({ access }: { access: Access | null }) {
+  if (!access) return <span className="text-slate-300" aria-label="Sin acceso">—</span>;
+  const p = ACCESS_PILL[access];
+  return <span className={`pill whitespace-nowrap ${p.className}`}>{p.text}</span>;
+}
+
+/**
+ * Module × role grid: the highest access each role has in each module. Each module expands to
+ * its individual permissions. Built from PERMISSION_GROUPS, so it always matches the code.
+ */
+function RoleMatrix() {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggle = (module: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(module)) next.delete(module);
+      else next.add(module);
+      return next;
+    });
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-500">
+        <span className="inline-flex items-center gap-1.5">
+          <AccessPill access="write" /> ve y cambia datos
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <AccessPill access="read" /> solo consulta
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <AccessPill access={null} /> sin acceso
+        </span>
+      </div>
+      <div className="overflow-x-auto rounded-2xl border border-blue-100">
+        <table className="w-full min-w-[46rem] border-separate border-spacing-0 text-sm">
+          <thead>
+            <tr className="bg-blue-50/70 text-[11px] uppercase tracking-wider text-slate-500">
+              <th scope="col" className="sticky left-0 z-10 min-w-[11rem] bg-blue-50 px-3 py-2 text-left font-bold">
+                Módulo
+              </th>
+              {ROLES.map((r) => (
+                <th key={r} scope="col" className="px-2 py-2 text-center font-bold normal-case tracking-normal text-xs text-blue-900">
+                  {ROLE_NAME[r]}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {PERMISSION_GROUPS.map((g) => {
+              const open = expanded.has(g.module);
+              return (
+                <Fragment key={g.module}>
+                  <tr>
+                    <th scope="row" className="sticky left-0 z-10 border-t border-blue-100 bg-white px-1 py-1.5 text-left font-normal">
+                      <button type="button" onClick={() => toggle(g.module)} aria-expanded={open} className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left font-semibold text-blue-900 hover:bg-blue-50">
+                        <svg viewBox="0 0 20 20" className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${open ? "rotate-90" : ""}`} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                          <path d="M8 5l5 5-5 5" />
+                        </svg>
+                        {g.module}
+                      </button>
+                    </th>
+                    {ROLES.map((r) => (
+                      <td key={r} className="border-t border-blue-100 px-2 py-1.5 text-center">
+                        <AccessPill access={moduleAccess(r, g)} />
+                      </td>
+                    ))}
+                  </tr>
+                  {open &&
+                    g.permissions.map((p) => (
+                      <tr key={p.key} className="bg-slate-50/70">
+                        <th scope="row" className="sticky left-0 z-10 bg-slate-50 py-1.5 pr-3 pl-9 text-left text-xs font-normal text-slate-600">
+                          <span className="block">{p.label}</span>
+                          <span className={`mt-0.5 inline-block text-[10px] font-bold uppercase tracking-wider ${p.access === "write" ? "text-emerald-700" : "text-blue-700"}`}>
+                            {p.access === "write" ? "Escritura" : "Lectura"}
+                          </span>
+                        </th>
+                        {ROLES.map((r) => (
+                          <td key={r} className="px-2 py-1.5 text-center">
+                            {hasPermission(r, p.key) ? (
+                              <span className="font-bold text-emerald-600" aria-label="Sí">
+                                ✓
+                              </span>
+                            ) : (
+                              <span className="text-slate-300" aria-label="No">
+                                —
+                              </span>
+                            )}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-xs text-slate-400">
+        Toque un módulo para ver sus permisos. Un permiso de escritura incluye siempre la lectura de su módulo. La matriz se define en el código
+        (src/lib/core/permissions.ts); cambiarla requiere un despliegue.
+      </p>
+    </div>
   );
 }

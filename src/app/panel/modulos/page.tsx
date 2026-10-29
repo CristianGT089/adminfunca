@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState } from "react";
-import { request } from "@/components/core/useSession";
+import { request, useSession } from "@/components/core/useSession";
 import { Alert, Empty, Field, Modal, PageHeader } from "@/components/core/ui";
 import type { PublicModule } from "@/lib/modules/academic/service";
 
@@ -11,6 +11,8 @@ type FormState = { name: string; program: string; hours: string };
 const empty: FormState = { name: "", program: "", hours: "" };
 
 function Content() {
+  const { can } = useSession();
+  const manages = can("modules.manage");
   const router = useRouter();
   const params = useSearchParams();
   // Came from the teacher form via «Agregar módulo nuevo»: the form opens and, on save, goes back.
@@ -76,9 +78,11 @@ function Content() {
         title="Módulos académicos"
         text="Asignaturas de cada programa. Se asignan a los docentes en su perfil y son la base de la nómina."
         action={
-          <button type="button" onClick={() => open("new")} className="btn-cta">
-            Nuevo módulo
-          </button>
+          manages && (
+            <button type="button" onClick={() => open("new")} className="btn-cta">
+              Nuevo módulo
+            </button>
+          )
         }
       />
 
@@ -114,12 +118,16 @@ function Content() {
                   </td>
                   <td data-t="Estado">{m.active ? <span className="pill bg-emerald-100 text-emerald-700">Activo</span> : <span className="pill bg-slate-100 text-slate-500">Inactivo</span>}</td>
                   <td className="text-right whitespace-nowrap">
-                    <button type="button" onClick={() => open(m)} className="btn-soft px-3 py-1 text-xs mr-1">
-                      Editar
-                    </button>
-                    <button type="button" onClick={() => toggleActive(m)} className="btn px-3 py-1 text-xs text-slate-500 hover:bg-slate-100">
-                      {m.active ? "Desactivar" : "Activar"}
-                    </button>
+                    {manages && (
+                      <>
+                        <button type="button" onClick={() => open(m)} className="btn-soft px-3 py-1 text-xs mr-1">
+                          Editar
+                        </button>
+                        <button type="button" onClick={() => toggleActive(m)} className="btn px-3 py-1 text-xs text-slate-500 hover:bg-slate-100">
+                          {m.active ? "Desactivar" : "Activar"}
+                        </button>
+                      </>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -130,7 +138,7 @@ function Content() {
 
       <Modal
         title={editing === "new" ? "Nuevo módulo" : "Editar módulo"}
-        open={!!editing}
+        open={!!editing && manages}
         onClose={() => {
           setEditing(null);
           if (returnTo) router.push(returnTo);

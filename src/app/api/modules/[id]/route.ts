@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
-import { readBody, withPermission, type IdParams } from "@/lib/core/http";
+import { readBody, withPermission, type IdParams, errorResponse } from "@/lib/core/http";
 import { audit } from "@/lib/core/audit";
 import { moduleSchema } from "@/lib/modules/academic/schemas";
 import { toPublicModule, updateModule } from "@/lib/modules/academic/service";
-import { InventoryError } from "@/lib/modules/inventory/service";
 
 export const PATCH = withPermission("modules.manage", async (req, user, { params }: IdParams) => {
   const { id } = await params;
@@ -14,7 +13,6 @@ export const PATCH = withPermission("modules.manage", async (req, user, { params
     await audit("modules.update", { userId: user.id, entity: "AcademicModule", entityId: id, details: { name: academicModule.name, active: academicModule.active } });
     return NextResponse.json({ module: toPublicModule(academicModule) });
   } catch (e) {
-    if (e instanceof InventoryError) return NextResponse.json({ error: e.message }, { status: e.status });
-    throw e;
+    return errorResponse(e);
   }
 });

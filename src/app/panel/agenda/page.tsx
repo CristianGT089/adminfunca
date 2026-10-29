@@ -15,7 +15,9 @@ import type { PublicModule } from "@/lib/modules/academic/service";
 const SAVED_VIEW = "admin-funca:schedule-view";
 
 export default function SchedulePage() {
-  const { session } = useSession();
+  const { session, can } = useSession();
+  // Modules are only needed by the form, and only roles that can see them get the list.
+  const seesModules = can("modules.view");
   const [view, setView] = useState<CalendarView>("month");
   const [date, setDate] = useState(() => startOfDay(new Date()));
   const [events, setEvents] = useState<PublicEvent[] | null>(null);
@@ -72,11 +74,17 @@ export default function SchedulePage() {
   }, [load]);
 
   useEffect(() => {
-    Promise.all([request<{ assignees: Assignee[] }>("/api/schedule/assignees"), request<{ modules: PublicModule[] }>("/api/modules?active=1")]).then(([a, m]) => {
+    request<{ assignees: Assignee[] }>("/api/schedule/assignees").then((a) => {
       if (a.ok) setAssignees(a.data.assignees);
-      if (m.ok) setModules(m.data.modules);
     });
   }, []);
+
+  useEffect(() => {
+    if (!seesModules) return;
+    request<{ modules: PublicModule[] }>("/api/modules?active=1").then((m) => {
+      if (m.ok) setModules(m.data.modules);
+    });
+  }, [seesModules]);
 
   // Academic coordination manages everything; internship coordination, only internships / field trips.
   const types = useMemo(() => (session ? managedTypes(session.role) : []), [session]);

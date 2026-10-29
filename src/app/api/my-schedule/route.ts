@@ -8,7 +8,7 @@ import { ownTypes } from "@/lib/modules/schedule/permissions";
 const noPerson = () => NextResponse.json({ error: "Su cuenta no está vinculada a una persona. Pida al administrador que la vincule en Usuarios y roles." }, { status: 409 });
 
 /** Entries under the name of the person linked to the account. */
-export const GET = withPermission("schedule.own", async (req, user) => {
+export const GET = withPermission("schedule.ownView", async (req, user) => {
   if (!user.personId) return noPerson();
   const p = new URL(req.url).searchParams;
   const r = rangeSchema.safeParse({ from: p.get("from"), to: p.get("to") });

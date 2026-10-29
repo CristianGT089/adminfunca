@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, type ReactNode } from "react";
 
 /** Page header: yellow eyebrow, title and main action on the right. */
@@ -95,5 +96,24 @@ export function CopyButton({ text }: { text: string }) {
     <button type="button" onClick={() => navigator.clipboard?.writeText(text)} className="btn-soft px-3 py-1 text-xs">
       Copiar
     </button>
+  );
+}
+
+/** Shown instead of a screen when the user lacks its read permission (e.g. opened by URL). */
+export function NoAccess({ text = "Su rol no tiene permiso para ver esta sección. Si lo necesita, pídalo al administrador del sistema." }: { text?: string }) {
+  return (
+    <div role="alert" className="card mx-auto mt-6 w-full max-w-lg p-6 text-center sm:p-8">
+      <div className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-blue-50 text-blue-800">
+        <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="5" y="11" width="14" height="10" rx="2" />
+          <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+        </svg>
+      </div>
+      <h1 className="mt-4 font-heading text-xl font-bold text-blue-900">Sin acceso</h1>
+      <p className="mt-2 text-sm text-slate-500">{text}</p>
+      <Link href="/panel" className="btn-secondary mt-5 inline-flex">
+        Volver al inicio
+      </Link>
+    </div>
   );
 }

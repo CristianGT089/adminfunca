@@ -20,13 +20,15 @@ const SHORTCUTS: Shortcut[] = [
   { href: "/panel/inventario/elementos", title: "Elementos del inventario", text: "Consulta, creación y etiquetado de elementos.", permission: "inventory.view", icon: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" },
   { href: "/panel/inventario/personas", title: "Personas", text: "Estudiantes, docentes y personal que reciben elementos.", permission: "inventory.people.view", icon: "M16 19v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1M9.5 10a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" },
   { href: "/panel/inventario/historial", title: "Historial de préstamos", text: "Entregas y devoluciones registradas.", permission: "inventory.view", icon: "M3 12a9 9 0 1 0 3-6.7M3 4v5h5M12 7v5l3 3" },
-  { href: "/panel/mi-agenda", title: "Mi agenda", text: "Lo que tengo programado y lo que falta cerrar.", permission: "schedule.own", icon: "M3 5h18v16H3zM3 10h18M8 3v4M16 3v4M8 15l2 2 4-4" },
+  { href: "/panel/mi-agenda", title: "Mi agenda", text: "Lo que tengo programado y lo que falta cerrar.", permission: "schedule.ownView", icon: "M3 5h18v16H3zM3 10h18M8 3v4M16 3v4M8 15l2 2 4-4" },
   { href: "/panel/psicologia", title: "Psicología", text: "Solicitudes de cita: registrar, tomar, programar y ver en qué va cada una.", permission: "psychology.view", icon: "M12 21s-7-4.5-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 11c0 5.5-7 10-7 10z" },
   { href: "/panel/agenda", title: "Agenda académica", text: "Clases, cursos, diplomados, prácticas y consultas. De aquí salen las horas de la nómina.", permission: "schedule.view", icon: "M3 5h18v16H3zM3 10h18M8 3v4M16 3v4" },
   { href: "/panel/docentes", title: "Docentes", text: "Perfil de cada docente y módulos que dicta.", permission: "teachers.view", icon: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0M2 8l10-5 10 5" },
+  { href: "/panel/modulos", title: "Módulos académicos", text: "Asignaturas de cada programa, base de la agenda y la nómina.", permission: "modules.view", icon: "M4 6h16M4 12h16M4 18h10" },
   { href: "/panel/nomina", title: "Horas y nómina", text: "Horas del mes por persona y tipo, revisión de requisitos y registro de pagos.", permission: "payroll.view", icon: "M3 5h18v14H3zM3 10h18M8 15h4" },
   { href: "/panel/usuarios", title: "Usuarios y roles", text: "Cuentas del personal y permisos por rol.", permission: "users.view", icon: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0" },
   { href: "/panel/auditoria", title: "Auditoría", text: "Bitácora de accesos y cambios.", permission: "audit.view", icon: "M9 5h6M9 9h6M9 13h4M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" },
+  { href: "/panel/proyeccion", title: "Proyección", text: "Pantalla de Día de Muertos para el salón.", permission: "projection.view", icon: "M3 5h18v12H3zM8 21h8M12 17v4M10 8.5v5l4.5-2.5z" },
 ];
 
 export default function HomePage() {

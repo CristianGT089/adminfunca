@@ -9,6 +9,8 @@ import { PapelPicado } from "./PapelPicado";
 import { Petals } from "./Petals";
 import { Player, type PlaybackInfo, type PlayerControl } from "./Player";
 import { Candle } from "./Candle";
+import { NoAccess } from "@/components/core/ui";
+import type { Permission } from "@/lib/core/permissions";
 import "./projection.css";
 
 type Settings = { links: string; shuffle: boolean; updatedAt: string };
@@ -29,6 +31,8 @@ export function Stage() {
   const [source, setSource] = useState<Source | null>(null);
   const [loading, setLoading] = useState(true);
   const [noPermission, setNoPermission] = useState(false);
+  // Only projection.manage changes the playlist; projection.view just plays it.
+  const [canEdit, setCanEdit] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [info, setInfo] = useState<PlaybackInfo | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -43,6 +47,15 @@ export function Stage() {
     setSource(parseLinks(c.links));
     setInfo(null);
     setNotice(null);
+  }, []);
+
+  // The user's permissions, read once (not with useSession: a session that expires or logs out
+  // elsewhere must not interrupt the music during the event).
+  useEffect(() => {
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d: { user: { permissions: Permission[] } | null }) => setCanEdit(!!d.user?.permissions.includes("projection.manage")))
+      .catch(() => {});
   }, []);
 
   // Initial load and periodic polling. If the session expires during the event, the music keeps playing.
@@ -65,7 +78,7 @@ export function Stage() {
       const { projection } = (await r.json()) as { projection: Settings | null };
       if (initial) {
         setLoading(false);
-        if (!projection) setPanelOpen(true);
+        if (!projection) setPanelOpen(true); // only shown to whoever can edit (see below)
       }
       if (projection && projection.updatedAt !== version.current) apply(projection);
     };
@@ -103,6 +116,7 @@ export function Stage() {
       if (panelOpen || e.ctrlKey || e.metaKey || e.altKey) return;
       const key = e.key.toLowerCase();
       if (key === "l") {
+        if (!canEdit) return;
         e.preventDefault();
         setPanelOpen(true);
       } else if (key === "f") fullscreen();
@@ -115,7 +129,7 @@ export function Stage() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [panelOpen, fullscreen]);
+  }, [panelOpen, fullscreen, canEdit]);
 
   // Hides the cursor and controls after a few seconds without moving the mouse.
   useEffect(() => {
@@ -133,6 +147,14 @@ export function Stage() {
       window.removeEventListener("mousedown", wake);
     };
   }, []);
+
+  // Opened by URL without projection.view: the shared message instead of the stage.
+  if (noPermission)
+    return (
+      <main className="min-h-dvh grid place-items-center bg-slate-50 p-4">
+        <NoAccess text="Su rol no tiene permiso para abrir la pantalla de proyección. Si lo necesita, pídalo al administrador del sistema." />
+      </main>
+    );
 
   const width = "min(62vw, 64vh * 16 / 9)";
   const shuffle = config?.shuffle ?? false;
@@ -172,15 +194,19 @@ export function Stage() {
               <div className="absolute inset-0 grid place-items-center bg-gradient-to-b from-noche-800 to-noche-950">
                 <div className="flex flex-col items-center gap-[2vh] text-center">
                   <DayOfTheDeadLogo className="w-[12vw] opacity-80" />
-                  {noPermission ? (
-                    <p className="font-heading text-[1.5vw] font-bold">No tienes permiso para la pantalla de proyección</p>
-                  ) : loading ? (
+                  {loading ? (
                     <p className="font-heading text-[1.5vw] font-bold">Cargando…</p>
                   ) : (
                     <>
                       <p className="font-heading text-[1.5vw] font-bold">Aún no hay música</p>
                       <p className="text-[0.95vw] text-white/60">
-                        Presiona <kbd>L</kbd> para pegar el link de tu lista de YouTube
+                        {canEdit ? (
+                          <>
+                            Presiona <kbd>L</kbd> para pegar el link de tu lista de YouTube
+                          </>
+                        ) : (
+                          "Quien administra la proyección debe cargar la lista de YouTube"
+                        )}
                       </p>
                     </>
                   )}
@@ -278,12 +304,14 @@ export function Stage() {
           active && !panelOpen ? "opacity-100" : "pointer-events-none opacity-0"
         }`}
       >
-        <button
-          onClick={() => setPanelOpen(true)}
-          className="rounded-full bg-noche-950/80 px-4 py-2 font-heading text-sm font-semibold ring-1 ring-white/15 hover:bg-noche-700"
-        >
-          🎵 Cambiar lista <kbd>L</kbd>
-        </button>
+        {canEdit && (
+          <button
+            onClick={() => setPanelOpen(true)}
+            className="rounded-full bg-noche-950/80 px-4 py-2 font-heading text-sm font-semibold ring-1 ring-white/15 hover:bg-noche-700"
+          >
+            🎵 Cambiar lista <kbd>L</kbd>
+          </button>
+        )}
         <button
           onClick={fullscreen}
           className="rounded-full bg-noche-950/80 px-4 py-2 font-heading text-sm font-semibold ring-1 ring-white/15 hover:bg-noche-700"
@@ -292,7 +320,7 @@ export function Stage() {
         </button>
       </div>
 
-      {panelOpen && !noPermission && (
+      {panelOpen && canEdit && (
         <LinkPanel initialText={config?.links ?? ""} initialShuffle={shuffle} onClose={() => setPanelOpen(false)} onSave={save} />
       )}
     </main>

@@ -1,40 +1,123 @@
 /**
  * Permission matrix per role. Single source of truth: navigation, screens and endpoints all
- * ask here. Each permission is "module.action". A new role = one row.
+ * ask here. Each permission is "module.action" and is either a READ permission (see data) or a
+ * WRITE permission (change data). A new role = one row in PERMISSIONS_BY_ROLE.
+ *
+ * Rules every module follows:
+ * - every GET endpoint requires a read permission of its module; every POST/PATCH/PUT/DELETE a
+ *   write permission;
+ * - a write permission implies the module's read permission (`withImplied`), so a role cannot
+ *   change what it cannot see;
+ * - screens hide the write controls when the user lacks the write permission (the endpoint
+ *   refuses anyway).
  *
  * This file imports nothing from the server so it can also be used on the client (to decide
  * what to show; real enforcement happens in the endpoints with `requirePermission`).
  */
 import type { Role } from "@prisma/client";
 
-export const PERMISSIONS = [
-  "users.view",
-  "users.manage",
-  "audit.view",
-  "inventory.view",
-  "inventory.loan", // hand out and receive items
-  "inventory.items.manage",
-  "inventory.people.view",
-  "inventory.people.manage",
-  "inventory.people.viewDocument", // see the full document number
-  "inventory.reports",
-  "payroll.view", // hours and status of the month's payroll
-  "payroll.manage", // review requirements, rates and approve the month
-  "payroll.pay", // record the payment
-  "teachers.view",
-  "teachers.manage",
-  "modules.manage", // academic modules
-  "schedule.view",
-  "schedule.manage", // any schedule entry
-  "schedule.fieldTrips", // schedule field trips / internship visits for any person in charge
-  "schedule.own", // "My schedule": see and close one's own entries (account linked to a person)
-  "psychology.view", // status of consultation requests (no clinical data)
-  "psychology.request", // register a consultation request
-  "psychology.attend", // take, schedule and record feedback (clinical data)
-  "projection.manage", // event projection screen (YouTube playlist)
+export type Access = "read" | "write";
+
+/** Permissions grouped by module, with their level and the Spanish label shown in the UI. */
+export const PERMISSION_GROUPS = [
+  {
+    module: "Usuarios y roles",
+    permissions: [
+      { key: "users.view", access: "read", label: "Ver cuentas" },
+      { key: "users.manage", access: "write", label: "Crear, editar y desactivar cuentas" },
+    ],
+  },
+  { module: "Auditoría", permissions: [{ key: "audit.view", access: "read", label: "Ver la bitácora" }] },
+  {
+    module: "Inventario",
+    permissions: [
+      { key: "inventory.view", access: "read", label: "Ver elementos e historial" },
+      { key: "inventory.people.view", access: "read", label: "Ver personas" },
+      { key: "inventory.people.viewDocument", access: "read", label: "Ver el documento completo" },
+      { key: "inventory.reports", access: "read", label: "Exportar reportes (CSV)" },
+      { key: "inventory.loan", access: "write", label: "Entregar y recibir elementos" },
+      { key: "inventory.items.manage", access: "write", label: "Crear y editar elementos" },
+      { key: "inventory.people.manage", access: "write", label: "Crear y editar personas" },
+    ],
+  },
+  {
+    module: "Docentes",
+    permissions: [
+      { key: "teachers.view", access: "read", label: "Ver docentes" },
+      { key: "teachers.manage", access: "write", label: "Crear y editar docentes" },
+    ],
+  },
+  {
+    module: "Módulos académicos",
+    permissions: [
+      { key: "modules.view", access: "read", label: "Ver módulos" },
+      { key: "modules.manage", access: "write", label: "Crear y editar módulos" },
+    ],
+  },
+  {
+    module: "Agenda",
+    permissions: [
+      { key: "schedule.view", access: "read", label: "Ver la agenda general" },
+      { key: "schedule.ownView", access: "read", label: "Ver mi agenda (registros propios)" },
+      { key: "schedule.manage", access: "write", label: "Gestionar cualquier registro" },
+      { key: "schedule.fieldTrips", access: "write", label: "Programar prácticas / salidas" },
+      { key: "schedule.own", access: "write", label: "Registrar y cerrar en mi agenda" },
+    ],
+  },
+  {
+    module: "Psicología",
+    permissions: [
+      { key: "psychology.view", access: "read", label: "Ver el estado de las solicitudes (sin datos clínicos)" },
+      { key: "psychology.request", access: "write", label: "Registrar solicitudes" },
+      { key: "psychology.attend", access: "write", label: "Atender casos (datos clínicos)" },
+    ],
+  },
+  {
+    module: "Horas y nómina",
+    permissions: [
+      { key: "payroll.view", access: "read", label: "Ver horas y estado del mes" },
+      { key: "payroll.manage", access: "write", label: "Revisar, fijar tarifas y aprobar" },
+      { key: "payroll.pay", access: "write", label: "Registrar pagos" },
+    ],
+  },
+  {
+    module: "Proyección",
+    permissions: [
+      { key: "projection.view", access: "read", label: "Abrir la pantalla de proyección" },
+      { key: "projection.manage", access: "write", label: "Cambiar la lista de reproducción" },
+    ],
+  },
 ] as const;
 
-export type Permission = (typeof PERMISSIONS)[number];
+export type Permission = (typeof PERMISSION_GROUPS)[number]["permissions"][number]["key"];
+export const PERMISSIONS: Permission[] = PERMISSION_GROUPS.flatMap((g) => g.permissions.map((p) => p.key));
+
+/** Read permission implied by each write permission. */
+const IMPLIES: Partial<Record<Permission, Permission>> = {
+  "users.manage": "users.view",
+  "inventory.loan": "inventory.view",
+  "inventory.items.manage": "inventory.view",
+  "inventory.people.manage": "inventory.people.view",
+  "teachers.manage": "teachers.view",
+  "modules.manage": "modules.view",
+  "schedule.manage": "schedule.view",
+  "schedule.fieldTrips": "schedule.view",
+  "schedule.own": "schedule.ownView",
+  "psychology.request": "psychology.view",
+  "psychology.attend": "psychology.view",
+  "payroll.manage": "payroll.view",
+  "payroll.pay": "payroll.view",
+  "projection.manage": "projection.view",
+};
+
+function withImplied(list: Permission[]): Permission[] {
+  const all = new Set(list);
+  for (const p of list) {
+    const implied = IMPLIES[p];
+    if (implied) all.add(implied);
+  }
+  return PERMISSIONS.filter((p) => all.has(p));
+}
 
 // Psychology clinical data belongs only to psychologists: not even IT can see it.
 const PROFESSIONAL_ONLY: Permission[] = ["psychology.attend"];
@@ -42,49 +125,33 @@ const ALL: Permission[] = PERMISSIONS.filter((p) => !PROFESSIONAL_ONLY.includes(
 
 export const PERMISSIONS_BY_ROLE: Record<Role, Permission[]> = {
   ADMIN: ALL,
-  ADMINISTRATIVE_COORDINATION: [
+  ADMINISTRATIVE_COORDINATION: withImplied([
     "users.view",
     "audit.view",
-    "inventory.view",
     "inventory.loan",
     "inventory.items.manage",
-    "inventory.people.view",
     "inventory.people.manage",
     "inventory.people.viewDocument",
     "inventory.reports",
-    "payroll.view",
     "payroll.pay",
     "teachers.view",
+    "modules.view",
     "schedule.view",
-    "psychology.view",
     "psychology.request",
-  ],
-  ACADEMIC_COORDINATION: [
+  ]),
+  ACADEMIC_COORDINATION: withImplied([
     "inventory.view",
     "inventory.people.view",
     "inventory.reports",
-    "payroll.view",
     "payroll.manage",
-    "teachers.view",
     "teachers.manage",
     "modules.manage",
-    "schedule.view",
     "schedule.manage",
-    "psychology.view",
     "psychology.request",
-  ],
-  ADMINISTRATIVE_ASSISTANT: [
-    "schedule.view",
-    "psychology.view",
-    "psychology.request",
-    "inventory.view",
-    "inventory.loan",
-    "inventory.items.manage",
-    "inventory.people.view",
-    "inventory.people.manage",
-  ],
-  PSYCHOLOGY: ["schedule.own", "psychology.view", "psychology.request", "psychology.attend"],
-  INTERNSHIP_COORDINATION: ["schedule.view", "schedule.fieldTrips", "schedule.own", "teachers.view"],
+  ]),
+  ADMINISTRATIVE_ASSISTANT: withImplied(["schedule.view", "psychology.request", "inventory.loan", "inventory.items.manage", "inventory.people.manage"]),
+  PSYCHOLOGY: withImplied(["schedule.own", "psychology.request", "psychology.attend"]),
+  INTERNSHIP_COORDINATION: withImplied(["schedule.fieldTrips", "schedule.own", "teachers.view", "modules.view"]),
 };
 
 // Role names as shown in the interface.
@@ -116,4 +183,11 @@ export function hasPermission(role: Role, permission: Permission | Permission[])
 
 export function permissionsOf(role: Role): Permission[] {
   return PERMISSIONS_BY_ROLE[role] ?? [];
+}
+
+/** Highest access a role has in a module ("write" if it holds any write permission of it). */
+export function moduleAccess(role: Role, group: (typeof PERMISSION_GROUPS)[number]): Access | null {
+  const held = group.permissions.filter((p) => hasPermission(role, p.key));
+  if (held.length === 0) return null;
+  return held.some((p) => p.access === "write") ? "write" : "read";
 }
