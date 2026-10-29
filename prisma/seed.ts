@@ -62,7 +62,6 @@ async function main() {
     await user("practicas", "Sergio Valencia", "INTERNSHIP_COORDINATION", "practicas123", "80456789");
     // Base hourly rates for the demo payroll.
     await prisma.person.updateMany({ where: { documentHash: { in: ["43123456", "52345678", "80456789"].map((d) => searchHash(d)) }, hourlyRate: null }, data: { hourlyRate: 28000 } });
-    await prisma.event.updateMany({ where: { type: "COURSE", hourlyRate: null }, data: { hourlyRate: 45000 } });
 
     const modules = [
       ["Técnico en Enfermería", "Soporte vital básico", 32],
@@ -114,6 +113,9 @@ async function main() {
       const fieldTrip = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 11, 9, 0);
       await prisma.event.create({ data: { type: "FIELD_TRIP", title: "Visita contrato de aprendizaje · Clínica San Rafael", startsAt: fieldTrip, endsAt: new Date(fieldTrip.getTime() + 2 * 3600000), hours: 2, campus: "Bogotá", teacherId: teacher.id } });
     }
+    // Courses are paid at their own rate (required by the schedule form). After creating the
+    // events, so it also applies on a fresh database.
+    await prisma.event.updateMany({ where: { type: "COURSE", hourlyRate: null }, data: { hourlyRate: 45000 } });
 
     // Psychology requests in different statuses.
     if ((await prisma.consultationRequest.count()) === 0) {
