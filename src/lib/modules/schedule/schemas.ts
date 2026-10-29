@@ -1,4 +1,5 @@
 import { z } from "zod";
+import "@/lib/core/zodConfig";
 import { SHIFTS } from "./shifts";
 
 export const EVENT_TYPES = ["MODULE_CLASS", "COURSE", "DIPLOMA", "FIELD_TRIP", "PSYCHOLOGY_SESSION", "OTHER"] as const;

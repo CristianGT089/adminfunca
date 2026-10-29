@@ -1,88 +1,129 @@
 /**
- * Monthly payroll. Hours come from the schedule: while the month is not approved, every query
- * recalculates the people who are not verified yet. Once a person is verified their calculation
- * is fixed; once the month is approved, that month's schedule can no longer be changed.
+ * Monthly payroll. Hours come from the schedule.
+ *
+ * Reading never writes: `getPayroll` / `itemDetail` compute the month in memory from the
+ * schedule, on top of what is stored. A month without a `PayrollPeriod` row is OPEN, and a person
+ * without a `PayrollItem` row is PENDING with no requirements checked.
+ *
+ * Rows are only written by the actions (inside one transaction that locks the period row):
+ * - an item action (requirements, verify, flag, reopen) upserts that person's row with the
+ *   calculation of that moment; on verify that calculation is frozen (VERIFIED and PAID rows are
+ *   shown as stored, not recalculated);
+ * - a period transition creates the period row if needed; approve requires every person to be
+ *   verified (i.e. frozen) and removes the leftover rows of people who no longer have activities;
+ * - once the month is approved only the stored rows count, and that month's schedule can no
+ *   longer be changed (`ensureMonthEditable`, which waits for this lock).
  */
 import type { PayrollItem, PayrollPeriod, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/core/prisma";
 import { BusinessError } from "@/lib/core/http";
-import { eventInclude, toPublicEvent } from "@/lib/modules/schedule/service";
+import { eventInclude, toPublicEvent, type Db } from "@/lib/modules/schedule/service";
 import type { EventType } from "@/lib/modules/schedule/schemas";
 import { calculate, countsForPayroll, effectiveRate } from "./calculation";
 import { requirementsMet, type ItemAction, type Calculation, type RequirementKey, type PayrollItemStatusValue, type PeriodStatus, type PeriodAction } from "./schemas";
 
 const monthRange = (year: number, month: number) => ({ gte: new Date(year, month - 1, 1), lt: new Date(year, month, 1) });
 
-async function periodOf(year: number, month: number) {
-  return prisma.payrollPeriod.upsert({ where: { year_month: { year, month } }, update: {}, create: { year, month } });
-}
+const personSelect = { id: true, firstNames: true, lastNames: true, documentLast4: true, type: true, hourlyRate: true, user: { select: { role: true } } } as const;
+type PersonInfo = Prisma.PersonGetPayload<{ select: typeof personSelect }>;
+const itemInclude = { person: { select: personSelect } } as const;
+type StoredItem = PayrollItem & { person: PersonInfo };
 
-/** Recalculates, from the schedule, the people of the month who are not verified or paid yet. */
-async function sync(period: PayrollPeriod) {
-  if (period.status === "APPROVED" || period.status === "PAID") return;
-  const events = await prisma.event.findMany({
-    where: { startsAt: monthRange(period.year, period.month), teacherId: { not: null } },
-    select: { type: true, hours: true, hourlyRate: true, payable: true, completion: true, startsAt: true, teacherId: true, teacher: { select: { hourlyRate: true } } },
+/** A person's line in the month: the stored row (if any) plus the calculation that applies. */
+type MonthItem = { person: PersonInfo; stored: StoredItem | null; calculation: Calculation; hours: number; amount: number };
+
+/** A verified or paid person keeps the calculation stored when they were verified. */
+const isFixed = (status: string) => status === "VERIFIED" || status === "PAID";
+/** In an approved or paid month only the stored rows count. */
+const isFrozen = (status: string) => status === "APPROVED" || status === "PAID";
+const notFound = () => new BusinessError("Registro de nómina no encontrado", 404);
+
+/** Calculation from the schedule of the people with activities in the month (or of one person). */
+async function freshCalculations(db: Db, year: number, month: number, filter: { personId?: string; exclude?: string[] } = {}) {
+  const exclude = filter.exclude ?? [];
+  const result = new Map<string, { person: PersonInfo; calculation: Calculation }>();
+  if (filter.personId && exclude.includes(filter.personId)) return result;
+  const events = await db.event.findMany({
+    where: { startsAt: monthRange(year, month), teacherId: filter.personId ?? { not: null, ...(exclude.length ? { notIn: exclude } : {}) } },
+    select: { type: true, hours: true, hourlyRate: true, payable: true, completion: true, startsAt: true, teacherId: true, teacher: { select: personSelect } },
   });
-  const byPerson = new Map<string, { base: number | null; events: typeof events }>();
+  const byPerson = new Map<string, { person: PersonInfo; events: typeof events }>();
   for (const e of events) {
-    const p = byPerson.get(e.teacherId!) ?? { base: e.teacher?.hourlyRate ?? null, events: [] };
+    if (!e.teacher) continue;
+    const p = byPerson.get(e.teacher.id) ?? { person: e.teacher, events: [] };
     p.events.push(e);
-    byPerson.set(e.teacherId!, p);
+    byPerson.set(e.teacher.id, p);
   }
-  const current = await prisma.payrollItem.findMany({ where: { periodId: period.id } });
-  const fixed = new Set(current.filter((i) => i.status === "VERIFIED" || i.status === "PAID").map((i) => i.personId));
-
-  const operations: Prisma.PrismaPromise<unknown>[] = [];
   for (const [personId, p] of byPerson) {
-    if (fixed.has(personId)) continue;
-    const calculation = calculate(p.events.map((e) => ({ ...e, type: e.type as EventType })), p.base);
+    const calculation = calculate(
+      p.events.map((e) => ({ ...e, type: e.type as EventType })),
+      p.person.hourlyRate
+    );
     if (calculation.events === 0 && calculation.withoutClosing === 0) continue;
-    const data = { calculation: calculation as unknown as Prisma.InputJsonValue, hours: calculation.hours, amount: calculation.amount };
-    operations.push(prisma.payrollItem.upsert({ where: { periodId_personId: { periodId: period.id, personId } }, update: data, create: { ...data, periodId: period.id, personId } }));
+    result.set(personId, { person: p.person, calculation });
   }
-  // Whoever no longer has activities in the month leaves the list (if they had not been verified).
-  const leftover = current.filter((i) => !fixed.has(i.personId) && !byPerson.has(i.personId)).map((i) => i.id);
-  if (leftover.length) operations.push(prisma.payrollItem.deleteMany({ where: { id: { in: leftover } } }));
-  if (operations.length) await prisma.$transaction(operations);
+  return result;
 }
 
-type ItemDb = PayrollItem & { person: { id: string; firstNames: string; lastNames: string; documentLast4: string; type: string; hourlyRate: number | null; user: { role: string } | null } };
+/** The month as it is now (read only). `personId` limits it to one person. */
+async function loadMonth(db: Db, year: number, month: number, personId?: string) {
+  const period = await db.payrollPeriod.findUnique({ where: { year_month: { year, month } } });
+  const stored: StoredItem[] = period ? await db.payrollItem.findMany({ where: { periodId: period.id, ...(personId ? { personId } : {}) }, include: itemInclude }) : [];
+  const frozen = !!period && isFrozen(period.status);
+  const fixed = stored.filter((i) => frozen || isFixed(i.status));
+  const items: MonthItem[] = fixed.map((i) => ({ person: i.person, stored: i, calculation: i.calculation as unknown as Calculation, hours: i.hours, amount: i.amount }));
+  if (!frozen) {
+    const byPerson = new Map(stored.map((i) => [i.personId, i]));
+    const fresh = await freshCalculations(db, year, month, { personId, exclude: fixed.map((i) => i.personId) });
+    for (const [id, f] of fresh) items.push({ person: f.person, stored: byPerson.get(id) ?? null, calculation: f.calculation, hours: f.calculation.hours, amount: f.calculation.amount });
+  }
+  return { period, stored, items };
+}
 
-function toPublicPayrollItem(i: ItemDb) {
-  const calculation = i.calculation as unknown as Calculation;
-  const requirements = (i.requirements ?? {}) as Partial<Record<RequirementKey, boolean>>;
+/**
+ * Creates the period row if needed and locks it until the end of the transaction: item actions,
+ * period transitions and schedule writes of that month (`ensureMonthEditable`) run one at a time.
+ */
+async function lockPeriod(tx: Prisma.TransactionClient, year: number, month: number): Promise<PayrollPeriod> {
+  const p = await tx.payrollPeriod.upsert({ where: { year_month: { year, month } }, update: {}, create: { year, month } });
+  await tx.$queryRaw`SELECT id FROM payroll_periods WHERE id = ${p.id} FOR UPDATE`;
+  return tx.payrollPeriod.findUniqueOrThrow({ where: { id: p.id } });
+}
+
+/**
+ * @returns the public line of a person. Its `id` is the person's id: a person may not have a
+ *   stored row yet, and the endpoints address a line by month + person.
+ */
+function toPublicPayrollItem(m: MonthItem) {
+  const s = m.stored;
+  const requirements = (s?.requirements ?? {}) as Partial<Record<RequirementKey, boolean>>;
   return {
-    id: i.id,
-    status: i.status as PayrollItemStatusValue,
+    id: m.person.id,
+    status: (s?.status ?? "PENDING") as PayrollItemStatusValue,
     person: {
-      id: i.person.id,
-      fullName: `${i.person.firstNames} ${i.person.lastNames}`,
-      lastNames: i.person.lastNames,
-      documentLast4: i.person.documentLast4,
-      profile: i.person.user?.role ?? i.person.type,
-      baseHourlyRate: i.person.hourlyRate,
+      id: m.person.id,
+      fullName: `${m.person.firstNames} ${m.person.lastNames}`,
+      lastNames: m.person.lastNames,
+      documentLast4: m.person.documentLast4,
+      profile: m.person.user?.role ?? m.person.type,
+      baseHourlyRate: m.person.hourlyRate,
     },
-    calculation,
-    hours: i.hours,
-    amount: i.amount,
+    calculation: m.calculation,
+    hours: m.hours,
+    amount: m.amount,
     requirements,
-    review: requirementsMet(calculation, requirements),
-    observation: i.observation,
-    verifiedAt: i.verifiedAt?.toISOString() ?? null,
-    paidAt: i.paidAt?.toISOString() ?? null,
-    paymentReference: i.paymentReference,
+    review: requirementsMet(m.calculation, requirements),
+    observation: s?.observation ?? null,
+    verifiedAt: s?.verifiedAt?.toISOString() ?? null,
+    paidAt: s?.paidAt?.toISOString() ?? null,
+    paymentReference: s?.paymentReference ?? null,
   };
 }
 export type PublicPayrollItem = ReturnType<typeof toPublicPayrollItem>;
 
-const itemInclude = { person: { select: { id: true, firstNames: true, lastNames: true, documentLast4: true, type: true, hourlyRate: true, user: { select: { role: true } } } } } as const;
-
 export async function getPayroll(year: number, month: number) {
-  let period = await periodOf(year, month);
-  await sync(period);
-  period = await prisma.payrollPeriod.findUniqueOrThrow({ where: { id: period.id } });
-  const items = (await prisma.payrollItem.findMany({ where: { periodId: period.id }, include: itemInclude })).map(toPublicPayrollItem).sort((a, b) => a.person.lastNames.localeCompare(b.person.lastNames));
+  const { period, items: lines } = await loadMonth(prisma, year, month);
+  const items = lines.map(toPublicPayrollItem).sort((a, b) => a.person.lastNames.localeCompare(b.person.lastNames));
 
   const hoursByType: Record<string, number> = {};
   const amountByType: Record<string, number> = {};
@@ -93,14 +134,15 @@ export async function getPayroll(year: number, month: number) {
   const byStatus = Object.fromEntries((["PENDING", "FLAGGED", "VERIFIED", "PAID"] as PayrollItemStatusValue[]).map((s) => [s, items.filter((i) => i.status === s).length])) as Record<PayrollItemStatusValue, number>;
   return {
     period: {
-      id: period.id,
-      year: period.year,
-      month: period.month,
-      status: period.status as PeriodStatus,
-      notes: period.notes,
-      inReviewAt: period.inReviewAt?.toISOString() ?? null,
-      approvedAt: period.approvedAt?.toISOString() ?? null,
-      paidAt: period.paidAt?.toISOString() ?? null,
+      // null while nobody has acted on the month (no row yet).
+      id: period?.id ?? null,
+      year,
+      month,
+      status: (period?.status ?? "OPEN") as PeriodStatus,
+      notes: period?.notes ?? null,
+      inReviewAt: period?.inReviewAt?.toISOString() ?? null,
+      approvedAt: period?.approvedAt?.toISOString() ?? null,
+      paidAt: period?.paidAt?.toISOString() ?? null,
       monthEnded: new Date() >= new Date(year, month, 1),
     },
     items,
@@ -118,103 +160,141 @@ export async function getPayroll(year: number, month: number) {
 }
 export type Payroll = Awaited<ReturnType<typeof getPayroll>>;
 
-/** A person's detail: their entries of the month with the rate that applies to each one. */
-export async function itemDetail(id: string) {
-  const item = await prisma.payrollItem.findUnique({ where: { id }, include: { ...itemInclude, period: true } });
-  if (!item) throw new BusinessError("Registro de nómina no encontrado", 404);
-  const events = await prisma.event.findMany({ where: { teacherId: item.personId, startsAt: monthRange(item.period.year, item.period.month) }, orderBy: { startsAt: "asc" }, include: eventInclude });
-  const base = item.person.hourlyRate;
-  const current = calculate(events.map((e) => ({ ...e, type: e.type as EventType })), base);
+/** A person's detail in the month: their entries with the rate that applies to each one. */
+export async function itemDetail(year: number, month: number, personId: string) {
+  const { items } = await loadMonth(prisma, year, month, personId);
+  const line = items[0];
+  if (!line) throw notFound();
+  const events = await prisma.event.findMany({ where: { teacherId: personId, startsAt: monthRange(year, month) }, orderBy: { startsAt: "asc" }, include: eventInclude });
+  const base = line.person.hourlyRate;
+  const current = calculate(
+    events.map((e) => ({ ...e, type: e.type as EventType })),
+    base
+  );
+  const item = toPublicPayrollItem(line);
   return {
-    item: toPublicPayrollItem(item),
+    item,
     events: events.map((e) => {
       const rate = effectiveRate(e, base);
       return { ...toPublicEvent(e), counts: countsForPayroll(e), appliedRate: rate, subtotal: countsForPayroll(e) && rate != null ? Math.round(e.hours * rate) : 0 };
     }),
     // If the person was already verified and the schedule changed afterwards, warn about it.
-    changedSinceVerification: (item.status === "VERIFIED" || item.status === "PAID") && (current.hours !== item.hours || current.amount !== item.amount),
+    changedSinceVerification: isFixed(item.status) && (current.hours !== item.hours || current.amount !== item.amount),
   };
 }
 
-export async function itemAction(id: string, action: ItemAction, userId: string) {
-  const item = await prisma.payrollItem.findUnique({ where: { id }, include: { ...itemInclude, period: true } });
-  if (!item) throw new BusinessError("Registro de nómina no encontrado", 404);
-  const periodStatus = item.period.status as PeriodStatus;
-  const inReview = periodStatus === "OPEN" || periodStatus === "IN_REVIEW";
-  let data: Prisma.PayrollItemUpdateInput;
+const calculationData = (c: Calculation) => ({ calculation: c as unknown as Prisma.InputJsonValue, hours: c.hours, amount: c.amount });
 
-  switch (action.action) {
-    case "requirements":
-      if (!inReview || item.status === "VERIFIED" || item.status === "PAID") throw new BusinessError("Reabra la revisión de esta persona para cambiar sus requisitos");
-      data = { requirements: { ...((item.requirements ?? {}) as object), ...action.requirements } };
-      break;
-    case "verify": {
-      if (!inReview) throw new BusinessError("El mes ya está aprobado");
-      const r = requirementsMet(item.calculation as unknown as Calculation, (item.requirements ?? {}) as Partial<Record<RequirementKey, boolean>>);
-      if (!r.complete) throw new BusinessError(`Faltan requisitos: ${r.list.filter((x) => !x.ok).map((x) => x.text.toLowerCase()).join("; ")}`);
-      data = { status: "VERIFIED", verifiedAt: new Date(), verifiedById: userId, observation: null };
-      break;
+/**
+ * Review or payment of a person in the month. The period status, the person's row and the
+ * schedule are read and written in one transaction holding the period lock, so an approval (or
+ * another action) cannot slip in between the check and the write.
+ */
+export async function itemAction(year: number, month: number, personId: string, action: ItemAction, userId: string) {
+  return prisma.$transaction(async (tx) => {
+    const period = await lockPeriod(tx, year, month);
+    const periodStatus = period.status as PeriodStatus;
+    const inReview = periodStatus === "OPEN" || periodStatus === "IN_REVIEW";
+    const where = { periodId_personId: { periodId: period.id, personId } };
+    const stored = await tx.payrollItem.findUnique({ where });
+    const status = (stored?.status ?? "PENDING") as PayrollItemStatusValue;
+    const fresh = inReview ? ((await freshCalculations(tx, year, month, { personId })).get(personId)?.calculation ?? null) : null;
+    // Someone without a row is only in the month while they have activities; a non-verified row
+    // of someone who no longer has them is not shown either.
+    if (!stored ? !fresh : !isFixed(status) && !isFrozen(periodStatus) && !fresh) throw notFound();
+    const calculation = fresh ?? (stored!.calculation as unknown as Calculation);
+    const requirements = (stored?.requirements ?? {}) as Partial<Record<RequirementKey, boolean>>;
+
+    let data: { status?: PayrollItemStatusValue; requirements?: Prisma.InputJsonValue; observation?: string | null; verifiedAt?: Date | null; verifiedById?: string | null };
+    switch (action.action) {
+      case "requirements":
+        if (!inReview || isFixed(status)) throw new BusinessError("Reabra la revisión de esta persona para cambiar sus requisitos");
+        data = { requirements: { ...requirements, ...action.requirements } };
+        break;
+      case "verify": {
+        if (!inReview) throw new BusinessError("El mes ya está aprobado");
+        const r = requirementsMet(calculation, requirements);
+        if (!r.complete) throw new BusinessError(`Faltan requisitos: ${r.list.filter((x) => !x.ok).map((x) => x.text.toLowerCase()).join("; ")}`);
+        // From here on this calculation is the one that is paid.
+        data = { status: "VERIFIED", verifiedAt: new Date(), verifiedById: userId, observation: null };
+        break;
+      }
+      case "flag":
+        if (!inReview) throw new BusinessError("El mes ya está aprobado");
+        data = { status: "FLAGGED", observation: action.observation, verifiedAt: null };
+        break;
+      case "reopen":
+        if (!inReview) throw new BusinessError("El mes ya está aprobado; primero devuélvalo a revisión");
+        data = { status: "PENDING", verifiedAt: null, verifiedById: null };
+        break;
+      case "pay": {
+        if (periodStatus !== "APPROVED") throw new BusinessError("Solo se registran pagos de un mes aprobado");
+        if (!stored || status !== "VERIFIED") throw new BusinessError("Esta persona no está verificada");
+        const paid = await tx.payrollItem.update({ where, data: { status: "PAID", paidAt: new Date(`${action.date}T12:00:00`), paymentReference: action.reference ?? null } });
+        await closeIfAllPaid(tx, period.id);
+        return paid;
+      }
     }
-    case "flag":
-      if (!inReview) throw new BusinessError("El mes ya está aprobado");
-      data = { status: "FLAGGED", observation: action.observation, verifiedAt: null };
-      break;
-    case "reopen":
-      if (!inReview) throw new BusinessError("El mes ya está aprobado; primero devuélvalo a revisión");
-      data = { status: "PENDING", verifiedAt: null, verifiedById: null };
-      break;
-    case "pay":
-      if (periodStatus !== "APPROVED") throw new BusinessError("Solo se registran pagos de un mes aprobado");
-      if (item.status !== "VERIFIED") throw new BusinessError("Esta persona no está verificada");
-      data = { status: "PAID", paidAt: new Date(`${action.date}T12:00:00`), paymentReference: action.reference ?? null };
-      break;
-  }
-  await prisma.payrollItem.update({ where: { id }, data });
-  if (action.action === "pay") await closeIfAllPaid(item.periodId);
-  // On reopen, the calculation is updated from the schedule on the next query.
-  return item.period;
+    // In review the row always takes the calculation of this moment (frozen on verify).
+    return tx.payrollItem.upsert({ where, update: { ...data, ...calculationData(calculation) }, create: { ...data, ...calculationData(calculation), periodId: period.id, personId } });
+  });
 }
 
-async function closeIfAllPaid(periodId: string) {
-  const remaining = await prisma.payrollItem.count({ where: { periodId, status: { not: "PAID" } } });
-  if (remaining === 0) await prisma.payrollPeriod.update({ where: { id: periodId }, data: { status: "PAID", paidAt: new Date() } });
+async function closeIfAllPaid(tx: Prisma.TransactionClient, periodId: string) {
+  const remaining = await tx.payrollItem.count({ where: { periodId, status: { not: "PAID" } } });
+  if (remaining === 0) await tx.payrollPeriod.update({ where: { id: periodId }, data: { status: "PAID", paidAt: new Date() } });
+}
+
+/** Rows of people who are no longer in the month (no activities and not verified). */
+async function removeLeftovers(tx: Prisma.TransactionClient, stored: StoredItem[], items: MonthItem[]) {
+  const shown = new Set(items.map((i) => i.person.id));
+  const leftover = stored.filter((i) => !shown.has(i.personId)).map((i) => i.id);
+  if (leftover.length) await tx.payrollItem.deleteMany({ where: { id: { in: leftover } } });
 }
 
 export async function periodAction(year: number, month: number, action: PeriodAction, userId: string, notes?: string | null) {
-  const period = await periodOf(year, month);
-  const status = period.status as PeriodStatus;
-  const extra = notes !== undefined ? { notes } : {};
-  switch (action) {
-    case "review":
-      if (status !== "OPEN") throw new BusinessError("El mes ya está en revisión o aprobado");
-      await sync(period);
-      return prisma.payrollPeriod.update({ where: { id: period.id }, data: { status: "IN_REVIEW", inReviewAt: new Date(), ...extra } });
-    case "reopen":
-      if (status !== "IN_REVIEW") throw new BusinessError("Solo se reabre un mes en revisión");
-      return prisma.payrollPeriod.update({ where: { id: period.id }, data: { status: "OPEN", ...extra } });
-    case "approve": {
-      if (status !== "IN_REVIEW") throw new BusinessError("Primero pase el mes a revisión");
-      await sync(period);
-      const items = await prisma.payrollItem.findMany({ where: { periodId: period.id }, select: { status: true } });
-      if (items.length === 0) throw new BusinessError("El mes no tiene personas para pagar");
-      const remaining = items.filter((i) => i.status !== "VERIFIED").length;
-      if (remaining > 0) throw new BusinessError(`Faltan ${remaining} persona${remaining === 1 ? "" : "s"} por verificar`);
-      return prisma.payrollPeriod.update({ where: { id: period.id }, data: { status: "APPROVED", approvedAt: new Date(), approvedById: userId, ...extra } });
+  return prisma.$transaction(async (tx) => {
+    const period = await lockPeriod(tx, year, month);
+    const status = period.status as PeriodStatus;
+    const extra = notes !== undefined ? { notes } : {};
+    switch (action) {
+      case "review": {
+        if (status !== "OPEN") throw new BusinessError("El mes ya está en revisión o aprobado");
+        const { stored, items } = await loadMonth(tx, year, month);
+        await removeLeftovers(tx, stored, items);
+        return tx.payrollPeriod.update({ where: { id: period.id }, data: { status: "IN_REVIEW", inReviewAt: new Date(), ...extra } });
+      }
+      case "reopen":
+        if (status !== "IN_REVIEW") throw new BusinessError("Solo se reabre un mes en revisión");
+        return tx.payrollPeriod.update({ where: { id: period.id }, data: { status: "OPEN", ...extra } });
+      case "approve": {
+        if (status !== "IN_REVIEW") throw new BusinessError("Primero pase el mes a revisión");
+        const { stored, items } = await loadMonth(tx, year, month);
+        if (items.length === 0) throw new BusinessError("El mes no tiene personas para pagar");
+        const remaining = items.filter((i) => i.stored?.status !== "VERIFIED").length;
+        if (remaining > 0) throw new BusinessError(`Faltan ${remaining} persona${remaining === 1 ? "" : "s"} por verificar`);
+        // Everyone is verified, so every row already holds its frozen calculation; what is left
+        // over (people without activities any more) goes away with the approval.
+        await removeLeftovers(tx, stored, items);
+        return tx.payrollPeriod.update({ where: { id: period.id }, data: { status: "APPROVED", approvedAt: new Date(), approvedById: userId, ...extra } });
+      }
+      case "unapprove": {
+        if (status !== "APPROVED") throw new BusinessError("El mes no está aprobado");
+        if (await tx.payrollItem.count({ where: { periodId: period.id, status: "PAID" } })) throw new BusinessError("Ya hay pagos registrados en este mes; no se puede devolver a revisión", 409);
+        return tx.payrollPeriod.update({ where: { id: period.id }, data: { status: "IN_REVIEW", approvedAt: null, approvedById: null, ...extra } });
+      }
     }
-    case "unapprove": {
-      if (status !== "APPROVED") throw new BusinessError("El mes no está aprobado");
-      if (await prisma.payrollItem.count({ where: { periodId: period.id, status: "PAID" } })) throw new BusinessError("Ya hay pagos registrados en este mes; no se puede devolver a revisión", 409);
-      return prisma.payrollPeriod.update({ where: { id: period.id }, data: { status: "IN_REVIEW", approvedAt: null, approvedById: null, ...extra } });
-    }
-  }
+  });
 }
 
 export async function payAll(year: number, month: number, date: string, reference: string | null) {
-  const period = await periodOf(year, month);
-  if (period.status !== "APPROVED") throw new BusinessError("Solo se registran pagos de un mes aprobado");
-  const r = await prisma.payrollItem.updateMany({ where: { periodId: period.id, status: "VERIFIED" }, data: { status: "PAID", paidAt: new Date(`${date}T12:00:00`), paymentReference: reference } });
-  await closeIfAllPaid(period.id);
-  return r.count;
+  return prisma.$transaction(async (tx) => {
+    const period = await lockPeriod(tx, year, month);
+    if (period.status !== "APPROVED") throw new BusinessError("Solo se registran pagos de un mes aprobado");
+    const r = await tx.payrollItem.updateMany({ where: { periodId: period.id, status: "VERIFIED" }, data: { status: "PAID", paidAt: new Date(`${date}T12:00:00`), paymentReference: reference } });
+    await closeIfAllPaid(tx, period.id);
+    return r.count;
+  });
 }
 
 /** A person's base hourly rate (used in the entries that don't carry their own). */

@@ -12,15 +12,18 @@ import { formatCop } from "./format";
 
 type Detail = { item: PublicPayrollItem; events: (PublicEvent & { counts: boolean; appliedRate: number | null; subtotal: number })[]; changedSinceVerification: boolean };
 
-export default function PersonDetail({ id, periodStatus, onClose, onChange }: { id: string | null; periodStatus: PeriodStatus; onClose: () => void; onChange: () => Promise<unknown> | void }) {
+type Month = { year: number; month: number };
+
+/** Review of a person in the month. `id` is the person's id (their line in the month). */
+export default function PersonDetail({ id, month, periodStatus, onClose, onChange }: { id: string | null; month: Month; periodStatus: PeriodStatus; onClose: () => void; onChange: () => Promise<unknown> | void }) {
   return (
     <Modal title="Revisión de la persona" open={!!id} onClose={onClose} width="max-w-4xl">
-      {id && <Content key={id} id={id} periodStatus={periodStatus} onChange={onChange} />}
+      {id && <Content key={`${month.year}-${month.month}-${id}`} url={`/api/payroll/people/${id}?year=${month.year}&month=${month.month}`} periodStatus={periodStatus} onChange={onChange} />}
     </Modal>
   );
 }
 
-function Content({ id, periodStatus, onChange }: { id: string; periodStatus: PeriodStatus; onChange: () => Promise<unknown> | void }) {
+function Content({ url, periodStatus, onChange }: { url: string; periodStatus: PeriodStatus; onChange: () => Promise<unknown> | void }) {
   const { can } = useSession();
   const [d, setD] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -31,12 +34,12 @@ function Content({ id, periodStatus, onChange }: { id: string; periodStatus: Per
 
   const load = useCallback(
     () =>
-      request<Detail>(`/api/payroll/items/${id}`).then(({ ok, data }) => {
+      request<Detail>(url).then(({ ok, data }) => {
         if (!ok) return setError(data.error ?? "No se pudo cargar");
         setD(data);
         setRate(data.item.person.baseHourlyRate?.toString() ?? "");
       }),
-    [id]
+    [url]
   );
   useEffect(() => {
     load();
@@ -44,7 +47,7 @@ function Content({ id, periodStatus, onChange }: { id: string; periodStatus: Per
 
   async function action(body: Record<string, unknown>) {
     setError(null);
-    const { ok, data } = await request<Detail>(`/api/payroll/items/${id}`, { method: "POST", json: body });
+    const { ok, data } = await request<Detail>(url, { method: "POST", json: body });
     if (!ok) return setError(data.error ?? "No se pudo guardar");
     setD(data);
     setPanel(null);
@@ -57,7 +60,7 @@ function Content({ id, periodStatus, onChange }: { id: string; periodStatus: Per
     setError(null);
     const { ok, data } = await request("/api/payroll/rate", { method: "PATCH", json: { personId: d.item.person.id, hourlyRate: rate === "" ? null : Number(rate) } });
     if (!ok) return setError(data.error ?? "No se pudo guardar la tarifa");
-    // When the payroll reloads, the server recalculates the person with the new rate.
+    // Reads recalculate the people who are not verified yet, so the new rate shows on reload.
     await onChange();
     load();
   }

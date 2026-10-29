@@ -2,7 +2,7 @@
  * Academic schedule: record of everything a teacher or a professional does (classes, courses,
  * diplomas, internships, sessions). Payroll adds up these entries.
  */
-import type { Event, AcademicModule, Person, Prisma, Role } from "@prisma/client";
+import type { Event, AcademicModule, Person, Prisma, PrismaClient, Role } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { prisma } from "@/lib/core/prisma";
 import { BusinessError } from "@/lib/core/http";
@@ -52,26 +52,38 @@ export type PublicEvent = ReturnType<typeof toPublicEvent>;
 
 export const hoursBetween = (startsAt: Date, endsAt: Date) => Math.round(((endsAt.getTime() - startsAt.getTime()) / 3600000) * 100) / 100;
 
+/** The global client or the one of an interactive transaction (`prisma.$transaction(async (tx) => …)`). */
+export type Db = PrismaClient | Prisma.TransactionClient;
+
 /**
  * An entry in a month whose payroll was already approved cannot be created, changed or deleted:
  * the paid amounts must match the schedule.
+ *
+ * Call it with the transaction client of the write it guards: the period row is read with
+ * `FOR SHARE`, so an approval of that month (which locks it `FOR UPDATE`) waits for the write to
+ * commit, and a write that arrives during an approval waits and then sees it approved.
  */
-export async function ensureMonthEditable(...dates: Date[]) {
-  for (const d of dates) {
-    const period = await prisma.payrollPeriod.findUnique({ where: { year_month: { year: d.getFullYear(), month: d.getMonth() + 1 } } });
-    if (period && (period.status === "APPROVED" || period.status === "PAID")) {
-      throw new BusinessError(`La nómina de ${d.toLocaleDateString("es-CO", { month: "long", year: "numeric" })} ya está aprobada; no se pueden cambiar sus registros`, 409);
+export async function ensureMonthEditable(dates: Date[], db: Db = prisma) {
+  const months = [...new Set(dates.map((d) => d.getFullYear() * 100 + d.getMonth() + 1))].sort((a, b) => a - b);
+  for (const ym of months) {
+    const year = Math.floor(ym / 100);
+    const month = ym % 100;
+    const rows = await db.$queryRaw<{ status: string }[]>`SELECT status::text AS status FROM payroll_periods WHERE year = ${year} AND month = ${month} FOR SHARE`;
+    const status = rows[0]?.status;
+    if (status === "APPROVED" || status === "PAID") {
+      const name = new Date(year, month - 1, 1).toLocaleDateString("es-CO", { month: "long", year: "numeric" });
+      throw new BusinessError(`La nómina de ${name} ya está aprobada; no se pueden cambiar sus registros`, 409);
     }
   }
 }
 
 /** Valid person in charge: a teacher or the person linked to a professional's account. */
-async function validateRelations(teacherId: string | null, moduleId: string | null) {
+async function validateRelations(teacherId: string | null, moduleId: string | null, db: Db = prisma) {
   if (teacherId) {
-    const t = await prisma.person.findUnique({ where: { id: teacherId }, include: { user: { select: { id: true } } } });
+    const t = await db.person.findUnique({ where: { id: teacherId }, include: { user: { select: { id: true } } } });
     if (!t || (t.type !== "TEACHER" && !t.user)) throw new BusinessError("El responsable no existe", 404);
   }
-  if (moduleId && !(await prisma.academicModule.findUnique({ where: { id: moduleId } }))) throw new BusinessError("El módulo no existe", 404);
+  if (moduleId && !(await db.academicModule.findUnique({ where: { id: moduleId } }))) throw new BusinessError("El módulo no existe", 404);
 }
 
 function eventFields(data: EventInput | EventEditInput, startsAt: Date, endsAt: Date) {
@@ -129,87 +141,109 @@ function sessionDates(data: EventInput): { dates: [Date, Date][] } {
   return { dates: dates.map((d) => [d, new Date(d.getTime() + duration)]) };
 }
 
+/** A series can have up to ~200 sessions: more time than the 5 s default for its transaction. */
+const LONG_TRANSACTION = { timeout: 30_000 };
+
 /** Creates the event and, if it has weekly repetition or a shift, one session per day. */
 export async function createEvents(data: EventInput, createdById: string) {
-  await validateRelations(data.teacherId, data.moduleId);
   const { dates } = sessionDates(data);
-  await ensureMonthEditable(...new Set(dates.map(([s]) => new Date(s.getFullYear(), s.getMonth(), 1))));
   const base = data.byShift ? { ...data, shift: data.byShift.shift, hours: null } : data;
   const seriesId = dates.length > 1 ? randomUUID() : null;
-  return prisma.$transaction(
-    dates.map(([start, end]) =>
-      prisma.event.create({
-        data: { ...eventFields(base, start, end), seriesId, createdById },
-        include: eventInclude,
-      })
-    )
-  );
+  return prisma.$transaction(async (tx) => {
+    await validateRelations(data.teacherId, data.moduleId, tx);
+    await ensureMonthEditable(
+      dates.map(([s]) => s),
+      tx
+    );
+    if (!seriesId) return [await tx.event.create({ data: { ...eventFields(base, dates[0][0], dates[0][1]), seriesId, createdById }, include: eventInclude })];
+    await tx.event.createMany({ data: dates.map(([start, end]) => ({ ...eventFields(base, start, end), seriesId, createdById })) });
+    return tx.event.findMany({ where: { seriesId }, orderBy: { startsAt: "asc" }, include: eventInclude });
+  }, LONG_TRANSACTION);
 }
 
-export async function getEvent(id: string) {
-  return prisma.event.findUnique({ where: { id }, include: eventInclude });
+export async function getEvent(id: string, db: Db = prisma) {
+  return db.event.findUnique({ where: { id }, include: eventInclude });
+}
+
+/**
+ * Check the endpoint makes on the entry (who may touch it). It runs again inside the transaction,
+ * on the row read there, so a change made in between (another type, another person) is noticed.
+ */
+export type EventGuard = (e: DbEvent) => boolean;
+
+async function currentEvent(id: string, db: Db, guard?: EventGuard) {
+  const current = await getEvent(id, db);
+  if (!current) throw new BusinessError("Evento no encontrado", 404);
+  if (guard && !guard(current)) throw new BusinessError("No tienes permiso para esta acción", 403);
+  notFromRequest(current);
+  return current;
 }
 
 function notFromRequest(e: { consultationRequest?: { number: number } | null }) {
   if (e.consultationRequest) throw new BusinessError(`Esta consulta viene de la solicitud #${e.consultationRequest.number}: se cambia desde Psicología`, 409);
 }
 
-export async function updateEvent(id: string, data: EventEditInput) {
-  const current = await getEvent(id);
-  if (!current) throw new BusinessError("Evento no encontrado", 404);
-  notFromRequest(current);
-  await validateRelations(data.teacherId, data.moduleId);
+export async function updateEvent(id: string, data: EventEditInput, guard?: EventGuard) {
   const startsAt = new Date(data.startsAt);
   const endsAt = new Date(data.endsAt);
+  return prisma.$transaction(async (tx) => {
+    const current = await currentEvent(id, tx, guard);
+    await validateRelations(data.teacherId, data.moduleId, tx);
 
-  if (data.scope === "series" && current.seriesId) {
-    // The whole series: each session keeps its date; time, duration and the other data change.
-    const sessions = await prisma.event.findMany({ where: { seriesId: current.seriesId } });
-    await ensureMonthEditable(...sessions.map((s) => s.startsAt));
-    const duration = endsAt.getTime() - startsAt.getTime();
-    await prisma.$transaction(
-      sessions.map((s) => {
+    if (data.scope === "series" && current.seriesId) {
+      // The whole series: each session keeps its date; time, duration and the other data change.
+      const sessions = await tx.event.findMany({ where: { seriesId: current.seriesId }, select: { id: true, startsAt: true, consultationRequest: { select: { number: true } } } });
+      sessions.forEach(notFromRequest);
+      await ensureMonthEditable(
+        sessions.map((s) => s.startsAt),
+        tx
+      );
+      const duration = endsAt.getTime() - startsAt.getTime();
+      for (const s of sessions) {
         const start = new Date(s.startsAt);
         start.setHours(startsAt.getHours(), startsAt.getMinutes(), 0, 0);
         const fields = eventFields(data, start, new Date(start.getTime() + duration));
-        return prisma.event.update({ where: { id: s.id }, data: { ...fields, hours: data.hours ?? fields.hours } });
-      })
-    );
-    return prisma.event.findUniqueOrThrow({ where: { id }, include: eventInclude });
-  }
-  await ensureMonthEditable(current.startsAt, startsAt);
-  return prisma.event.update({ where: { id }, data: eventFields(data, startsAt, endsAt), include: eventInclude });
+        await tx.event.update({ where: { id: s.id }, data: { ...fields, hours: data.hours ?? fields.hours } });
+      }
+      return tx.event.findUniqueOrThrow({ where: { id }, include: eventInclude });
+    }
+    await ensureMonthEditable([current.startsAt, startsAt], tx);
+    return tx.event.update({ where: { id }, data: eventFields(data, startsAt, endsAt), include: eventInclude });
+  }, LONG_TRANSACTION);
 }
 
-export async function deleteEvent(id: string, scope: "one" | "series") {
-  const current = await getEvent(id);
-  if (!current) throw new BusinessError("Evento no encontrado", 404);
-  notFromRequest(current);
-  if (scope === "series" && current.seriesId) {
-    const where = { seriesId: current.seriesId, startsAt: { gte: current.startsAt } };
-    const sessions = await prisma.event.findMany({ where, select: { startsAt: true, consultationRequest: { select: { number: true } } } });
-    // No session of the series may come from a psychology request (same rule as for a single one).
-    sessions.forEach(notFromRequest);
-    await ensureMonthEditable(...sessions.map((s) => s.startsAt));
-    const r = await prisma.event.deleteMany({ where });
-    return r.count;
-  }
-  await ensureMonthEditable(current.startsAt);
-  await prisma.event.delete({ where: { id } });
-  return 1;
+export async function deleteEvent(id: string, scope: "one" | "series", guard?: EventGuard) {
+  return prisma.$transaction(async (tx) => {
+    const current = await currentEvent(id, tx, guard);
+    if (scope === "series" && current.seriesId) {
+      const where = { seriesId: current.seriesId, startsAt: { gte: current.startsAt } };
+      const sessions = await tx.event.findMany({ where, select: { startsAt: true, consultationRequest: { select: { number: true } } } });
+      // No session of the series may come from a psychology request (same rule as for a single one).
+      sessions.forEach(notFromRequest);
+      await ensureMonthEditable(
+        sessions.map((s) => s.startsAt),
+        tx
+      );
+      const r = await tx.event.deleteMany({ where });
+      return r.count;
+    }
+    await ensureMonthEditable([current.startsAt], tx);
+    await tx.event.delete({ where: { id } });
+    return 1;
+  });
 }
 
 /** Records whether the activity took place. Only after its start time. */
-export async function closeEvent(id: string, data: ClosingInput, userId: string) {
-  const current = await getEvent(id);
-  if (!current) throw new BusinessError("Evento no encontrado", 404);
-  notFromRequest(current);
-  if (current.startsAt > new Date()) throw new BusinessError("El cierre se registra cuando la actividad ya empezó");
-  await ensureMonthEditable(current.startsAt);
-  return prisma.event.update({
-    where: { id },
-    data: { completion: data.completion, closingNote: data.note, closedAt: new Date(), closedById: userId },
-    include: eventInclude,
+export async function closeEvent(id: string, data: ClosingInput, userId: string, guard?: EventGuard) {
+  return prisma.$transaction(async (tx) => {
+    const current = await currentEvent(id, tx, guard);
+    if (current.startsAt > new Date()) throw new BusinessError("El cierre se registra cuando la actividad ya empezó");
+    await ensureMonthEditable([current.startsAt], tx);
+    return tx.event.update({
+      where: { id },
+      data: { completion: data.completion, closingNote: data.note, closedAt: new Date(), closedById: userId },
+      include: eventInclude,
+    });
   });
 }
 

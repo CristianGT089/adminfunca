@@ -6,6 +6,7 @@
  * PAID (administrative coordination recorded every payment).
  */
 import { z } from "zod";
+import "@/lib/core/zodConfig";
 
 export const PERIOD_STATUSES = ["OPEN", "IN_REVIEW", "APPROVED", "PAID"] as const;
 export type PeriodStatus = (typeof PERIOD_STATUSES)[number];

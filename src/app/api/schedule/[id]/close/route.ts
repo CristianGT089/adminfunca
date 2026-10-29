@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withPermission, readBody, notFound, errorResponse, forbidden, type IdParams } from "@/lib/core/http";
 import { audit } from "@/lib/core/audit";
-import { closingSchema } from "@/lib/modules/schedule/schemas";
+import { closingSchema, type EventType } from "@/lib/modules/schedule/schemas";
 import { closeEvent, toPublicEvent, getEvent } from "@/lib/modules/schedule/service";
 import { managedTypes } from "@/lib/modules/schedule/permissions";
 
@@ -12,10 +12,10 @@ export const POST = withPermission(["schedule.manage", "schedule.fieldTrips", "s
   if (error) return error;
   const current = await getEvent(id);
   if (!current) return notFound("Evento");
-  const own = !!user.personId && current.teacherId === user.personId;
-  if (!own && !managedTypes(user.role).includes(current.type)) return forbidden();
+  const allowed = (e: { teacherId: string | null; type: string }) => (!!user.personId && e.teacherId === user.personId) || managedTypes(user.role).includes(e.type as EventType);
+  if (!allowed(current)) return forbidden();
   try {
-    const event = await closeEvent(id, data, user.id);
+    const event = await closeEvent(id, data, user.id, allowed);
     await audit("schedule.close", { userId: user.id, entity: "Event", entityId: id, details: { completion: data.completion } });
     return NextResponse.json({ event: toPublicEvent(event) });
   } catch (e) {

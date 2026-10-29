@@ -242,7 +242,7 @@ export default function PayrollPage() {
             </section>
           )}
 
-          <PersonDetail id={opened} periodStatus={n.period.status} onClose={() => setOpened(null)} onChange={load} />
+          <PersonDetail id={opened} month={month} periodStatus={n.period.status} onClose={() => setOpened(null)} onChange={load} />
           <PayAll open={payAll} month={month} total={n.items.filter((i) => i.status === "VERIFIED").reduce((s, i) => s + i.amount, 0)} onClose={() => setPayAll(false)} onDone={(m) => { setPayAll(false); notify(m); }} />
         </>
       )}

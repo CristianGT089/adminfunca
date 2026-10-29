@@ -14,7 +14,7 @@ export const PATCH = withPermission(["schedule.manage", "schedule.fieldTrips"], 
   const types = managedTypes(user.role);
   if (!types.includes(current.type) || !types.includes(data.type)) return forbidden();
   try {
-    const event = await updateEvent(id, data);
+    const event = await updateEvent(id, data, (e) => types.includes(e.type));
     await audit("schedule.update", { userId: user.id, entity: "Event", entityId: id, details: { scope: data.scope, type: data.type } });
     return NextResponse.json({ event: toPublicEvent(event) });
   } catch (e) {
@@ -27,9 +27,10 @@ export const DELETE = withPermission(["schedule.manage", "schedule.fieldTrips"],
   const scope = new URL(req.url).searchParams.get("scope") === "series" ? "series" : "one";
   const current = await getEvent(id);
   if (!current) return notFound("Evento");
-  if (!managedTypes(user.role).includes(current.type)) return forbidden();
+  const types = managedTypes(user.role);
+  if (!types.includes(current.type)) return forbidden();
   try {
-    const n = await deleteEvent(id, scope);
+    const n = await deleteEvent(id, scope, (e) => types.includes(e.type));
     await audit("schedule.delete", { userId: user.id, entity: "Event", entityId: id, details: { scope, deleted: n } });
     return NextResponse.json({ deleted: n });
   } catch (e) {
