@@ -1,9 +1,94 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { request, useSession } from "@/components/core/useSession";
-import { Alert, PageHeader, Field } from "@/components/core/ui";
+import { Alert, PageHeader, Field, formatDate } from "@/components/core/ui";
+
+type OpenSession = { id: string; createdAt: string; lastSeenAt: string; ip: string | null; userAgent: string | null; current: boolean };
+
+/** "Chrome · Windows" from the user agent; enough to recognize one's own devices. */
+function device(ua: string | null) {
+  if (!ua) return "Dispositivo desconocido";
+  const browser = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "Navegador";
+  const os = /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Windows/.test(ua) ? "Windows" : /Mac OS/.test(ua) ? "macOS" : /Linux/.test(ua) ? "Linux" : "";
+  return os ? `${browser} · ${os}` : browser;
+}
+
+function Sessions() {
+  const [sessions, setSessions] = useState<OpenSession[] | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const load = useCallback(
+    () =>
+      request<{ sessions: OpenSession[] }>("/api/auth/sessions").then(({ ok, data }) => {
+        if (ok) setSessions(data.sessions);
+      }),
+    []
+  );
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function close(id?: string) {
+    const { ok, data } = await request<{ closed: number }>(`/api/auth/sessions${id ? `?id=${encodeURIComponent(id)}` : ""}`, { method: "DELETE" });
+    if (ok) setMessage(data.closed === 1 ? "Se cerró 1 sesión." : `Se cerraron ${data.closed} sesiones.`);
+    load();
+  }
+
+  const others = sessions?.filter((s) => !s.current).length ?? 0;
+  return (
+    <section className="card p-6 flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="eyebrow">Sesiones abiertas</p>
+          <p className="mt-1 text-sm text-slate-500">Las sesiones se cierran solas tras 2 horas sin actividad o 8 horas desde que entró.</p>
+        </div>
+        {others > 0 && (
+          <button type="button" onClick={() => close()} className="btn-secondary">
+            Cerrar las demás sesiones
+          </button>
+        )}
+      </div>
+      {message && <Alert type="ok">{message}</Alert>}
+      {sessions === null ? (
+        <p className="text-sm text-slate-400">Cargando...</p>
+      ) : (
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Dispositivo</th>
+              <th>IP</th>
+              <th>Inicio</th>
+              <th>Última actividad</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {sessions.map((s) => (
+              <tr key={s.id}>
+                <td>
+                  {device(s.userAgent)}
+                  {s.current && <span className="pill ml-2 bg-emerald-100 text-emerald-700">Esta sesión</span>}
+                </td>
+                <td data-t="IP" className="font-mono text-xs text-slate-500">{s.ip ?? "—"}</td>
+                <td data-t="Inicio">{formatDate(s.createdAt)}</td>
+                <td data-t="Última actividad">{formatDate(s.lastSeenAt)}</td>
+                <td className="text-right">
+                  {!s.current && (
+                    <button type="button" onClick={() => close(s.id)} className="btn-danger px-3 py-1 text-xs">
+                      Cerrar
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
 
 function Content() {
   const { session } = useSession();
@@ -62,6 +147,7 @@ function Content() {
           </aside>
         )}
       </div>
+      {!first && <Sessions />}
     </>
   );
 }

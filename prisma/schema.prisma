@@ -39,9 +39,6 @@ model User {
   // Temporary lockout after several failed login attempts.
   failedAttempts     Int       @default(0) @map("failed_attempts")
   lockedUntil        DateTime? @map("locked_until")
-  // Bumped when the password is changed or reset, the role changes or the account is
-  // deactivated: sessions signed with an older version stop being valid.
-  sessionVersion     Int       @default(0) @map("session_version")
   lastLoginAt        DateTime? @map("last_login_at")
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
@@ -55,6 +52,7 @@ model User {
   personId String? @unique @map("person_id")
   person   Person? @relation(fields: [personId], references: [id], onDelete: SetNull)
 
+  sessions           Session[]
   auditLogs          AuditLog[]
   createdEvents      Event[]
   closedEvents       Event[]               @relation("EventClosedBy")
@@ -65,6 +63,24 @@ model User {
   reportedIssues     LoanIssue[]
 
   @@map("users")
+}
+
+// A login. The cookie only carries a signed reference to this row, so a session can be
+// revoked server-side (logout, password change/reset, role change, deactivation, "close the
+// other sessions") and expires by inactivity as well as by absolute time.
+model Session {
+  id         String    @id @default(cuid())
+  userId     String    @map("user_id")
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at")
+  expiresAt  DateTime  @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+  ip         String?
+  userAgent  String?   @map("user_agent")
+
+  @@index([userId, revokedAt])
+  @@map("sessions")
 }
 
 // Who did what and when. Written by the server on every sensitive operation (login,

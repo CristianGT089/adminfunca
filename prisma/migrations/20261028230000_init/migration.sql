@@ -60,7 +60,6 @@ CREATE TABLE "users" (
     "must_change_password" BOOLEAN NOT NULL DEFAULT true,
     "failed_attempts" INTEGER NOT NULL DEFAULT 0,
     "locked_until" TIMESTAMP(3),
-    "session_version" INTEGER NOT NULL DEFAULT 0,
     "last_login_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
@@ -68,6 +67,20 @@ CREATE TABLE "users" (
     "person_id" TEXT,
 
     CONSTRAINT "users_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "sessions" (
+    "id" TEXT NOT NULL,
+    "user_id" TEXT NOT NULL,
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "last_seen_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "expires_at" TIMESTAMP(3) NOT NULL,
+    "revoked_at" TIMESTAMP(3),
+    "ip" TEXT,
+    "user_agent" TEXT,
+
+    CONSTRAINT "sessions_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -307,6 +320,9 @@ CREATE UNIQUE INDEX "users_username_key" ON "users"("username");
 CREATE UNIQUE INDEX "users_person_id_key" ON "users"("person_id");
 
 -- CreateIndex
+CREATE INDEX "sessions_user_id_revoked_at_idx" ON "sessions"("user_id", "revoked_at");
+
+-- CreateIndex
 CREATE INDEX "audit_logs_user_id_created_at_idx" ON "audit_logs"("user_id", "created_at");
 
 -- CreateIndex
@@ -385,6 +401,9 @@ ALTER TABLE "users" ADD CONSTRAINT "users_created_by_id_fkey" FOREIGN KEY ("crea
 ALTER TABLE "users" ADD CONSTRAINT "users_person_id_fkey" FOREIGN KEY ("person_id") REFERENCES "people"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "sessions" ADD CONSTRAINT "sessions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "audit_logs" ADD CONSTRAINT "audit_logs_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -441,3 +460,7 @@ ALTER TABLE "payroll_items" ADD CONSTRAINT "payroll_items_period_id_fkey" FOREIG
 -- AddForeignKey
 ALTER TABLE "payroll_items" ADD CONSTRAINT "payroll_items_person_id_fkey" FOREIGN KEY ("person_id") REFERENCES "people"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
+
+-- An item has at most one open loan (returned_at IS NULL). Prisma cannot express partial
+-- unique indexes in the schema, so it lives here; the service also checks it first.
+CREATE UNIQUE INDEX "loans_one_open_per_item" ON "loans"("item_id") WHERE "returned_at" IS NULL;

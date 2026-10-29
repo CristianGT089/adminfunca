@@ -5,6 +5,7 @@ import { withPermission, readBody, notFound, errorResponse, type IdParams } from
 import { linkPerson } from "@/lib/core/personLink";
 import { ROLES } from "@/lib/core/permissions";
 import { audit } from "@/lib/core/audit";
+import { revokeSessions } from "@/lib/core/auth";
 
 const schema = z.object({
   name: z.string().trim().min(1).max(100).optional(),
@@ -34,15 +35,14 @@ export const PATCH = withPermission("users.manage", async (req, actor, { params 
   }
   // A role change or deactivation ends the user's open sessions.
   const endSessions = (changes.role !== undefined && changes.role !== existing.role) || changes.active === false;
-  const user = await prisma.user.update({
-    where: { id },
-    data: {
-      ...changes,
-      role: changes.role as never,
-      ...(changes.active === false ? { lockedUntil: null } : {}),
-      ...(endSessions ? { sessionVersion: { increment: 1 } } : {}),
-    },
-    select: { id: true, name: true, username: true, role: true, active: true, personId: true },
+  const user = await prisma.$transaction(async (tx) => {
+    const updated = await tx.user.update({
+      where: { id },
+      data: { ...changes, role: changes.role as never, ...(changes.active === false ? { lockedUntil: null } : {}) },
+      select: { id: true, name: true, username: true, role: true, active: true, personId: true },
+    });
+    if (endSessions) await revokeSessions(id, { db: tx });
+    return updated;
   });
   await audit("users.update", { userId: actor.id, entity: "User", entityId: id, details: { ...changes, ...(link !== undefined ? { link: link ? `••••${link.document.slice(-4)}` : null } : {}) } });
   return NextResponse.json({ user });

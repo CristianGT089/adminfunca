@@ -19,26 +19,46 @@ export type Session = {
  * The user's session on the client. Without a session it redirects to the login. The
  * permissions it carries decide what to show; the server checks them again on every request.
  */
+// Tells the other open tabs that the user logged out, so they leave too.
+const LOGOUT_CHANNEL = "admin-funca:logout";
+
+// Full reload to the login: clears any personal data kept in memory by the page.
+const toLogin = () => window.location.replace("/");
+
 export function useSession() {
   const router = useRouter();
   const [session, setSession] = useState<Session | null>(null);
 
   useEffect(() => {
-    fetch("/api/auth/me")
-      .then((r) => r.json())
-      .then((d) => {
-        if (!d.user) {
-          router.replace("/");
-          return;
-        }
-        setSession(d.user);
-      });
+    const check = () =>
+      fetch("/api/auth/me", { cache: "no-store" })
+        .then((r) => r.json())
+        .then((d) => {
+          if (!d.user) return toLogin();
+          setSession(d.user);
+        })
+        .catch(() => {});
+    check();
+    // Coming back to the tab: the session may have ended (logout elsewhere, inactivity, revoked).
+    const onVisible = () => document.visibilityState === "visible" && check();
+    document.addEventListener("visibilitychange", onVisible);
+    const channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel(LOGOUT_CHANNEL) : null;
+    if (channel) channel.onmessage = toLogin;
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      channel?.close();
+    };
   }, [router]);
 
   const logout = useCallback(async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.replace("/");
-  }, [router]);
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    if (typeof BroadcastChannel !== "undefined") {
+      const channel = new BroadcastChannel(LOGOUT_CHANNEL);
+      channel.postMessage("logout");
+      channel.close();
+    }
+    toLogin();
+  }, []);
 
   const can = useCallback((permission: Permission) => session?.permissions.includes(permission) ?? false, [session]);
 
