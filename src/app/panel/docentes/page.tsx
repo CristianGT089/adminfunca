@@ -60,14 +60,18 @@ function Content() {
     } catch {}
     const base = draft?.form ?? empty;
     const restored = { ...base, moduleIds: Array.from(new Set([...base.moduleIds, newModule])) };
-    request<{ teacher: PublicTeacher }>(draft?.editingId ? `/api/teachers/${draft.editingId}` : "/api/auth/me").then(({ ok, data }) => {
-      setEditing(draft?.editingId && ok ? data.teacher : "new");
+    const editingId = draft?.editingId ?? null;
+    const finish = (teacher: PublicTeacher | null) => {
+      setEditing(teacher ?? "new");
       setForm(restored);
       try {
         sessionStorage.removeItem(DRAFT);
       } catch {}
       router.replace("/panel/docentes");
-    });
+    };
+    // Only an existing teacher has to be reloaded; a new one needs no request.
+    if (editingId) request<{ teacher: PublicTeacher }>(`/api/teachers/${editingId}`).then(({ ok, data }) => finish(ok ? data.teacher : null));
+    else finish(null);
   }, [newModule, router]);
 
   const manages = can("teachers.manage");
@@ -199,7 +203,7 @@ function Content() {
         </div>
       )}
 
-      <Modal title={editing === "new" ? "Nuevo docente" : "Editar docente"} open={!!editing} onClose={() => setEditing(null)} width="max-w-3xl">
+      <Modal title={editing === "new" ? "Nuevo docente" : "Editar docente"} open={!!editing && manages} onClose={() => setEditing(null)} width="max-w-3xl">
         <form onSubmit={save} className="grid gap-4 sm:grid-cols-2">
           <Field label="Nombres">
             <input className="field" required {...field("firstNames")} autoFocus />

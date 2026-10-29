@@ -1,4 +1,5 @@
 import { z } from "zod";
+import "@/lib/core/zodConfig";
 
 const text = (max: number) => z.string().trim().max(max);
 const optionalText = (max: number) =>

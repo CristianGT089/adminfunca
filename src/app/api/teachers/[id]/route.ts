@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/core/prisma";
-import { notFound, readBody, withPermission, type IdParams } from "@/lib/core/http";
+import { notFound, readBody, withPermission, type IdParams, errorResponse } from "@/lib/core/http";
 import { audit } from "@/lib/core/audit";
 import { teacherSchema } from "@/lib/modules/academic/schemas";
 import { getTeacher, toPublicTeacher, updateTeacher } from "@/lib/modules/academic/service";
-import { InventoryError } from "@/lib/modules/inventory/service";
 
 export const GET = withPermission("teachers.view", async (_req, user, { params }: IdParams) => {
   const { id } = await params;
@@ -35,7 +34,6 @@ export const PATCH = withPermission("teachers.manage", async (req, user, { param
     await audit("teachers.update", { userId: user.id, entity: "Person", entityId: id, details: { modules: data.moduleIds.length } });
     return NextResponse.json({ teacher: toPublicTeacher(teacher, user) });
   } catch (e) {
-    if (e instanceof InventoryError) return NextResponse.json({ error: e.message }, { status: e.status });
-    throw e;
+    return errorResponse(e);
   }
 });

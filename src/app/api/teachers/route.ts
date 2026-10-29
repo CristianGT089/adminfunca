@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
-import { readBody, withPermission } from "@/lib/core/http";
+import { readBody, withPermission, errorResponse } from "@/lib/core/http";
 import { audit } from "@/lib/core/audit";
 import { teacherSchema } from "@/lib/modules/academic/schemas";
 import { createTeacher, listTeachers, toPublicTeacher } from "@/lib/modules/academic/service";
-import { InventoryError } from "@/lib/modules/inventory/service";
 
 export const GET = withPermission("teachers.view", async (req, user) => {
   const q = new URL(req.url).searchParams.get("q") ?? "";
@@ -19,7 +18,6 @@ export const POST = withPermission("teachers.manage", async (req, user) => {
     await audit("teachers.create", { userId: user.id, entity: "Person", entityId: teacher.id, details: { modules: data.moduleIds.length } });
     return NextResponse.json({ teacher: toPublicTeacher(teacher, user) }, { status: 201 });
   } catch (e) {
-    if (e instanceof InventoryError) return NextResponse.json({ error: e.message }, { status: e.status });
-    throw e;
+    return errorResponse(e);
   }
 });

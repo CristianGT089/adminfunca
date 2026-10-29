@@ -2,7 +2,7 @@
  * Logic of the Inventory module. Endpoints only validate, call here and audit.
  * This is where it is decided what gets encrypted, what is returned to the client and the loan rules.
  */
-import type { Item, LoanIssue, Person, Loan, User, ReturnCondition } from "@prisma/client";
+import { Prisma, type Item, type LoanIssue, type Person, type Loan, type User, type ReturnCondition } from "@prisma/client";
 import { prisma } from "@/lib/core/prisma";
 import { encrypt, decrypt, mask, searchHash, normalizeCode } from "@/lib/core/crypto";
 import { hasPermission } from "@/lib/core/permissions";
@@ -11,6 +11,27 @@ import type { ItemInput, PersonInput } from "./schemas";
 
 /** Name kept for compatibility; it is a BusinessError. */
 export class InventoryError extends BusinessError {}
+
+/** Prisma client or the client of an interactive transaction (`prisma.$transaction(async (tx) => ...)`). */
+export type Db = Prisma.TransactionClient;
+
+/** True when the error is a violated unique constraint (Prisma `P2002`). */
+export function isUniqueViolation(e: unknown): boolean {
+  return e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
+}
+
+/**
+ * Runs a write and turns a unique-constraint violation into a 409 business error. The pre-checks
+ * give the friendly message in the usual case; this covers two requests racing past them.
+ */
+async function uniqueOr409<T>(write: () => Promise<T>, message: string): Promise<T> {
+  try {
+    return await write();
+  } catch (e) {
+    if (isUniqueViolation(e)) throw new InventoryError(message, 409);
+    throw e;
+  }
+}
 
 // ------------------------------------------------------------------ People
 
@@ -71,25 +92,29 @@ function personFields(data: PersonInput) {
   };
 }
 
-export async function createPerson(data: PersonInput) {
+const PERSON_EXISTS = "Ya existe una persona con ese documento o código de carnet";
+const PERSON_CONFLICT = "Otra persona ya tiene ese documento o código de carnet";
+
+/** `db` lets a caller run it inside its own transaction (e.g. teacher + modules). */
+export async function createPerson(data: PersonInput, db: Db = prisma) {
   const fields = personFields(data);
-  const exists = await prisma.person.findFirst({
+  const exists = await db.person.findFirst({
     where: { OR: [{ documentHash: fields.documentHash }, ...(fields.cardCode ? [{ cardCode: fields.cardCode }] : [])] },
   });
-  if (exists) throw new InventoryError("Ya existe una persona con ese documento o código de carnet", 409);
-  return prisma.person.create({ data: fields });
+  if (exists) throw new InventoryError(PERSON_EXISTS, 409);
+  return uniqueOr409(() => db.person.create({ data: fields }), PERSON_EXISTS);
 }
 
-export async function updatePerson(id: string, data: PersonInput) {
+export async function updatePerson(id: string, data: PersonInput, db: Db = prisma) {
   const fields = personFields(data);
-  const conflict = await prisma.person.findFirst({
+  const conflict = await db.person.findFirst({
     where: {
       id: { not: id },
       OR: [{ documentHash: fields.documentHash }, ...(fields.cardCode ? [{ cardCode: fields.cardCode }] : [])],
     },
   });
-  if (conflict) throw new InventoryError("Otra persona ya tiene ese documento o código de carnet", 409);
-  return prisma.person.update({ where: { id }, data: fields });
+  if (conflict) throw new InventoryError(PERSON_CONFLICT, 409);
+  return uniqueOr409(() => db.person.update({ where: { id }, data: fields }), PERSON_CONFLICT);
 }
 
 /**
@@ -157,21 +182,41 @@ export type PublicItem = ReturnType<typeof toPublicItem>;
 
 const includeOpenLoan = { loans: { where: { returnedAt: null }, include: { person: true }, take: 1 } } as const;
 
+const ITEM_EXISTS = "Ya existe un elemento con ese código";
+const ITEM_CONFLICT = "Otro elemento ya tiene ese código";
+
+/** The LOANED status is controlled by loans and returns, never by the form. */
+const formStatus = (status: ItemInput["status"]) => (status === "LOANED" ? "AVAILABLE" : status);
+
 export async function createItem(data: ItemInput) {
   const code = normalizeCode(data.code);
-  if (await prisma.item.findUnique({ where: { code } })) throw new InventoryError("Ya existe un elemento con ese código", 409);
-  return prisma.item.create({ data: { ...data, code }, include: includeOpenLoan });
+  if (await prisma.item.findUnique({ where: { code } })) throw new InventoryError(ITEM_EXISTS, 409);
+  return uniqueOr409(() => prisma.item.create({ data: { ...data, code, status: formStatus(data.status) }, include: includeOpenLoan }), ITEM_EXISTS);
 }
 
 export async function updateItem(id: string, data: ItemInput) {
   const code = normalizeCode(data.code);
   const conflict = await prisma.item.findFirst({ where: { code, id: { not: id } } });
-  if (conflict) throw new InventoryError("Otro elemento ya tiene ese código", 409);
-  const current = await prisma.item.findUnique({ where: { id } });
-  if (!current) throw new InventoryError("Elemento no encontrado", 404);
-  // The LOANED status is controlled by the loan, not by the form.
-  const status = current.status === "LOANED" ? "LOANED" : data.status === "LOANED" ? "AVAILABLE" : data.status;
-  return prisma.item.update({ where: { id }, data: { ...data, code, status }, include: includeOpenLoan });
+  if (conflict) throw new InventoryError(ITEM_CONFLICT, 409);
+  // Conditional updates instead of read-then-write: a loan or a return running at the same time
+  // cannot be overwritten. A loaned item keeps LOANED (only its other fields change); any other
+  // item takes the form status. If a loan/return flips the status between both attempts, retry.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const notLoaned = await uniqueOr409(
+      () => prisma.item.updateMany({ where: { id, status: { not: "LOANED" } }, data: { ...data, code, status: formStatus(data.status) } }),
+      ITEM_CONFLICT
+    );
+    if (notLoaned.count === 0) {
+      // `status: undefined` leaves LOANED untouched.
+      const loaned = await uniqueOr409(() => prisma.item.updateMany({ where: { id, status: "LOANED" }, data: { ...data, code, status: undefined } }), ITEM_CONFLICT);
+      if (loaned.count === 0) {
+        if (!(await prisma.item.findUnique({ where: { id }, select: { id: true } }))) throw new InventoryError("Elemento no encontrado", 404);
+        continue;
+      }
+    }
+    return prisma.item.findUniqueOrThrow({ where: { id }, include: includeOpenLoan });
+  }
+  throw new InventoryError("El elemento cambió mientras se guardaba. Intenta de nuevo.", 409);
 }
 
 export async function findItemByCode(code: string) {
@@ -261,19 +306,27 @@ export async function loanItem(args: { personId: string; itemId: string; registe
   return prisma.$transaction(async (tx) => {
     const person = await tx.person.findUnique({ where: { id: args.personId } });
     if (!person || !person.active) throw new InventoryError("La persona no existe o está inactiva", 404);
-    const item = await tx.item.findUnique({ where: { id: args.itemId } });
-    if (!item) throw new InventoryError("El elemento no existe", 404);
-    if (item.status === "RETIRED") throw new InventoryError("El elemento está dado de baja");
-    if (item.status === "MAINTENANCE") throw new InventoryError("El elemento está en mantenimiento");
-    const open = await tx.loan.findFirst({ where: { itemId: item.id, returnedAt: null }, include: { person: true } });
-    if (open || item.status === "LOANED") {
+    const alreadyLoaned = async () => {
+      const open = await tx.loan.findFirst({ where: { itemId: args.itemId, returnedAt: null }, include: { person: true } });
       const who = open ? `${open.person.firstNames} ${open.person.lastNames}` : "otra persona";
-      throw new InventoryError(`El elemento ya está prestado a ${who}. Regístralo como devuelto primero.`, 409);
+      return new InventoryError(`El elemento ya está prestado a ${who}. Regístralo como devuelto primero.`, 409);
+    };
+    // Claim the item atomically: only one of two simultaneous loans gets count 1 (the row lock makes
+    // the other one re-check the status after the first commits). Throwing later rolls the claim back.
+    const claimed = await tx.item.updateMany({ where: { id: args.itemId, status: "AVAILABLE" }, data: { status: "LOANED" } });
+    if (claimed.count === 0) {
+      const item = await tx.item.findUnique({ where: { id: args.itemId } });
+      if (!item) throw new InventoryError("El elemento no existe", 404);
+      if (item.status === "RETIRED") throw new InventoryError("El elemento está dado de baja");
+      if (item.status === "MAINTENANCE") throw new InventoryError("El elemento está en mantenimiento");
+      throw await alreadyLoaned();
     }
+    // One open loan per item, even if the status was out of sync.
+    if (await tx.loan.findFirst({ where: { itemId: args.itemId, returnedAt: null }, select: { id: true } })) throw await alreadyLoaned();
     const loan = await tx.loan.create({
       data: {
         personId: person.id,
-        itemId: item.id,
+        itemId: args.itemId,
         registeredById: args.registeredById,
         notes: args.notes,
         deliveredAt: args.deliveredAt ?? undefined,
@@ -281,23 +334,25 @@ export async function loanItem(args: { personId: string; itemId: string; registe
       },
       include: includeLoan,
     });
-    await tx.item.update({ where: { id: item.id }, data: { status: "LOANED" } });
     return loan;
   });
 }
 
 export async function returnItem(args: { loanId: string; returnedById: string; returnCondition: ReturnCondition; returnNote: string | null }) {
   return prisma.$transaction(async (tx) => {
-    const loan = await tx.loan.findUnique({ where: { id: args.loanId } });
-    if (!loan) throw new InventoryError("Préstamo no encontrado", 404);
-    if (loan.returnedAt) throw new InventoryError("Ese préstamo ya fue devuelto", 409);
-    const updated = await tx.loan.update({
-      where: { id: loan.id },
+    // Conditional close: of two simultaneous returns only one finds the loan still open.
+    const closed = await tx.loan.updateMany({
+      where: { id: args.loanId, returnedAt: null },
       data: { returnedAt: new Date(), returnedById: args.returnedById, returnCondition: args.returnCondition, returnNote: args.returnNote },
-      include: includeLoan,
     });
+    if (closed.count === 0) {
+      const exists = await tx.loan.findUnique({ where: { id: args.loanId }, select: { id: true } });
+      if (!exists) throw new InventoryError("Préstamo no encontrado", 404);
+      throw new InventoryError("Ese préstamo ya fue devuelto", 409);
+    }
+    const updated = await tx.loan.findUniqueOrThrow({ where: { id: args.loanId }, include: includeLoan });
     await tx.item.update({
-      where: { id: loan.itemId },
+      where: { id: updated.itemId },
       data: { status: args.returnCondition === "DAMAGED" ? "MAINTENANCE" : "AVAILABLE" },
     });
     return updated;

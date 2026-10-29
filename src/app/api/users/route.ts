@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/core/prisma";
 import { withPermission, readBody } from "@/lib/core/http";
 import { ROLES, PROFESSIONAL_ROLES } from "@/lib/core/permissions";
@@ -39,20 +40,27 @@ export const POST = withPermission("users.manage", async (req, actor) => {
     return NextResponse.json({ error: "Para este rol indique el documento de la persona: sus actividades se pagan a su nombre" }, { status: 400 });
   }
   const password = generatePassword();
-  const created = await prisma.user.create({
-    data: { name: data.name, username: data.username, role: data.role as never, passwordHash: await hashPassword(password), createdById: actor.id, mustChangePassword: true },
-    select: selection,
-  });
-  await audit("users.create", { userId: actor.id, entity: "User", entityId: created.id, details: { role: created.role } });
-  if (data.document) {
-    try {
-      await linkPerson(created.id, { name: data.name, documentType: data.documentType, document: data.document });
-    } catch (e) {
-      // The account already exists: report the link problem, which can be fixed later.
-      await prisma.user.delete({ where: { id: created.id } });
-      return errorResponse(e);
+  const passwordHash = await hashPassword(password); // outside the transaction: bcrypt is slow
+  let created: { id: string; role: string };
+  try {
+    // Account and link to the person in one transaction: if the link fails, no account is left behind.
+    created = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: { name: data.name, username: data.username, role: data.role as never, passwordHash, createdById: actor.id, mustChangePassword: true },
+        select: { id: true, role: true },
+      });
+      if (data.document) await linkPerson(user.id, { name: data.name, documentType: data.documentType, document: data.document }, tx);
+      return user;
+    });
+  } catch (e) {
+    // Same username created by a simultaneous request (the check above passed for both).
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      return NextResponse.json({ error: "Ese nombre de usuario ya existe" }, { status: 409 });
     }
+    return errorResponse(e);
   }
+  // Audited only once the account really exists.
+  await audit("users.create", { userId: actor.id, entity: "User", entityId: created.id, details: { role: created.role } });
   const user = await prisma.user.findUniqueOrThrow({ where: { id: created.id }, select: selection });
   // The temporary password is shown only once; it is not stored in clear text.
   return NextResponse.json({ user, temporaryPassword: password }, { status: 201 });

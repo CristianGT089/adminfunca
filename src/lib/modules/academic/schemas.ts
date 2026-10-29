@@ -1,4 +1,5 @@
 import { z } from "zod";
+import "@/lib/core/zodConfig";
 import { personSchema } from "@/lib/modules/inventory/schemas";
 
 export const moduleSchema = z.object({

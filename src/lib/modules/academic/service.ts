@@ -1,7 +1,23 @@
 import type { AcademicModule, Person, User } from "@prisma/client";
 import { prisma } from "@/lib/core/prisma";
-import { createPerson, InventoryError, toPublicPerson, updatePerson } from "@/lib/modules/inventory/service";
+import { BusinessError } from "@/lib/core/http";
+import { createPerson, isUniqueViolation, toPublicPerson, updatePerson, type Db } from "@/lib/modules/inventory/service";
 import type { ModuleInput, TeacherInput } from "./schemas";
+
+/** Business-rule error of the academic module (teachers and modules). */
+export class AcademicError extends BusinessError {}
+
+const MODULE_EXISTS = "Ya existe ese módulo en ese programa";
+
+/** A unique violation that slipped past the pre-check (two simultaneous requests) → same 409. */
+async function moduleUniqueOr409<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (e) {
+    if (isUniqueViolation(e)) throw new AcademicError(MODULE_EXISTS, 409);
+    throw e;
+  }
+}
 
 export function toPublicModule(m: AcademicModule & { _count?: { teachers: number } }) {
   return { id: m.id, name: m.name, program: m.program, hours: m.hours, active: m.active, teachers: m._count?.teachers ?? 0 };
@@ -18,18 +34,22 @@ export async function listModules(activeOnly = false) {
 
 export async function createModule(data: ModuleInput) {
   const exists = await prisma.academicModule.findUnique({ where: { program_name: { program: data.program, name: data.name } } });
-  if (exists) throw new InventoryError("Ya existe ese módulo en ese programa", 409);
-  return prisma.academicModule.create({ data: { name: data.name, program: data.program, hours: data.hours ?? null }, include: { _count: { select: { teachers: true } } } });
+  if (exists) throw new AcademicError(MODULE_EXISTS, 409);
+  return moduleUniqueOr409(() =>
+    prisma.academicModule.create({ data: { name: data.name, program: data.program, hours: data.hours ?? null }, include: { _count: { select: { teachers: true } } } })
+  );
 }
 
 export async function updateModule(id: string, data: ModuleInput) {
   const clash = await prisma.academicModule.findFirst({ where: { program: data.program, name: data.name, id: { not: id } } });
-  if (clash) throw new InventoryError("Ya existe ese módulo en ese programa", 409);
-  return prisma.academicModule.update({
-    where: { id },
-    data: { name: data.name, program: data.program, hours: data.hours ?? null, ...(data.active !== undefined ? { active: data.active } : {}) },
-    include: { _count: { select: { teachers: true } } },
-  });
+  if (clash) throw new AcademicError(MODULE_EXISTS, 409);
+  return moduleUniqueOr409(() =>
+    prisma.academicModule.update({
+      where: { id },
+      data: { name: data.name, program: data.program, hours: data.hours ?? null, ...(data.active !== undefined ? { active: data.active } : {}) },
+      include: { _count: { select: { teachers: true } } },
+    })
+  );
 }
 
 // ------------------------------------------------------------------ Teachers
@@ -68,25 +88,31 @@ export async function getTeacher(id: string) {
   return t && t.type === "TEACHER" ? t : null;
 }
 
-async function assignModules(personId: string, moduleIds: string[]) {
-  const valid = await prisma.academicModule.findMany({ where: { id: { in: moduleIds } }, select: { id: true } });
-  await prisma.$transaction([
-    prisma.teacherModule.deleteMany({ where: { personId } }),
-    prisma.teacherModule.createMany({ data: valid.map((m) => ({ personId, moduleId: m.id })) }),
-  ]);
+/** Replaces the teacher's modules (unknown ids are ignored). Runs inside the caller's transaction. */
+async function assignModules(tx: Db, personId: string, moduleIds: string[]) {
+  const valid = await tx.academicModule.findMany({ where: { id: { in: moduleIds } }, select: { id: true } });
+  await tx.teacherModule.deleteMany({ where: { personId } });
+  await tx.teacherModule.createMany({ data: valid.map((m) => ({ personId, moduleId: m.id })) });
 }
 
+/** The person and their modules are written in one transaction: either both or neither. */
 export async function createTeacher(data: TeacherInput) {
   const { moduleIds, ...person } = data;
-  const created = await createPerson({ ...person, type: "TEACHER" });
-  await assignModules(created.id, moduleIds);
-  return (await getTeacher(created.id))!;
+  const id = await prisma.$transaction(async (tx) => {
+    const created = await createPerson({ ...person, type: "TEACHER" }, tx);
+    await assignModules(tx, created.id, moduleIds);
+    return created.id;
+  });
+  return (await getTeacher(id))!;
 }
 
 export async function updateTeacher(id: string, data: TeacherInput) {
-  if (!(await getTeacher(id))) throw new InventoryError("Docente no encontrado", 404);
   const { moduleIds, ...person } = data;
-  await updatePerson(id, { ...person, type: "TEACHER" });
-  await assignModules(id, moduleIds);
+  await prisma.$transaction(async (tx) => {
+    const current = await tx.person.findUnique({ where: { id }, select: { type: true } });
+    if (current?.type !== "TEACHER") throw new AcademicError("Docente no encontrado", 404);
+    await updatePerson(id, { ...person, type: "TEACHER" }, tx);
+    await assignModules(tx, id, moduleIds);
+  });
   return (await getTeacher(id))!;
 }
