@@ -26,6 +26,12 @@ pnpm dev                        # http://localhost:3020
 `.env` (the values in `.env.example` are enough for local development). If you change
 `POSTGRES_PASSWORD`, change it in `DATABASE_URL` too.
 
+`.env.example` points `DATABASE_URL` at the `admin_funca` database of the compose Postgres (the
+same one the `app` container uses). To keep development data apart, you can point it at another
+database in the same server (for example `.../admin_funca_dev`): create it once with
+`docker compose exec db createdb -U admin_funca admin_funca_dev` and `prisma migrate deploy`
+fills it.
+
 Demo users created by the seed (only outside production):
 
 | Username          | Password       | Role (identifier)             | Display name                 |
@@ -45,7 +51,9 @@ HTTP helpers, schedule permissions, shifts, payroll, psychology and projection),
 It is a single deployment (simpler to run on the VPS), but the code is split so that the
 *backend* (`src/lib` + `src/app/api`) does not depend on the *frontend* (`src/app/panel` +
 `src/components`). If a separate service is ever needed (for example, for the reader in a
-mobile app), the routes in `src/app/api` are already a JSON API with cookie-based sessions.
+mobile app), the routes in `src/app/api` are already a JSON API with cookie-based sessions. The
+deployment already runs database migrations in their own image (`migrator`, see deployment),
+separate from the web app image: the first step towards a separate back end and front end.
 
 Code is in English; the user interface and page URLs (`/panel/...`, `/solicitar-cita`,
 `/privacidad`, `/proyeccion`) are in Spanish.
@@ -54,8 +62,8 @@ Code is in English; the user interface and page URLs (`/panel/...`, `/solicitar-
 src/
 ├── lib/
 │   ├── core/                   Independent of any module
-│   │   ├── auth.ts             JWT session in an httpOnly cookie (8 h); requireUser / requirePermission; clientIp
-│   │   ├── permissions.ts      PERMISSION MATRIX per role (single source of truth)
+│   │   ├── auth.ts             Server-side sessions (`sessions` table) referenced by a signed cookie; requireUser / requirePermission; clientIp
+│   │   ├── permissions.ts      PERMISSION MATRIX per role, read/write per module (single source of truth)
 │   │   ├── crypto.ts           HMAC for searching + AES-256-GCM for personal data
 │   │   ├── audit.ts            Action log
 │   │   ├── passwords.ts        bcrypt, password generator and rules
@@ -63,6 +71,7 @@ src/
 │   │   ├── mail.ts             Outgoing email (SMTP via nodemailer)
 │   │   ├── rateLimit.ts        In-memory rate limit (login, public appointment link)
 │   │   ├── personLink.ts       Links a user account to a person by document
+│   │   ├── zodConfig.ts        Zod in jitless mode (no eval, see CSP)
 │   │   └── prisma.ts
 │   └── modules/
 │       ├── inventory/          schemas.ts (Zod: people, items, loans) · service.ts (lookup by code, loan, return)
@@ -78,11 +87,12 @@ src/
 │   │   ├── agenda/  mi-agenda/ docentes/  modulos/  psicologia/  nomina/  proyeccion/
 │   │   ├── usuarios/           Accounts and permission matrix
 │   │   ├── auditoria/          Audit log
-│   │   └── cuenta/             Password change
+│   │   └── cuenta/             Mi cuenta: password change and open sessions
 │   ├── solicitar-cita/         Public appointment request form (+ confirmar/)
 │   ├── privacidad/             Data policy
 │   ├── proyeccion/             Full-screen projection, outside the panel
-│   └── api/                    JSON endpoints; each one requires a permission
+│   └── api/                    JSON endpoints; each one requires a permission (except auth/, health/, public/)
+├── proxy.ts                    Per-request CSP with a nonce for every page
 └── components/
     ├── core/                   Shell (sidebar), ui (cards, modal, table…), Selector, useSession
     ├── inventory/  schedule/  psychology/  payroll/  projection/
@@ -97,34 +107,56 @@ permissions in `permissions.ts` and its menu entries in `app/panel/layout.tsx`.
 ## Roles and permissions
 
 Roles are the Prisma `Role` enum; what each one can do is in `src/lib/core/permissions.ts`
-and can be seen in the platform under *Usuarios y roles → Ver permisos por rol*. Summary:
+(`PERMISSION_GROUPS` and `PERMISSIONS_BY_ROLE`) and can be seen in the platform under
+*Usuarios y roles → Ver permisos por rol*, as a module × role grid marked *Lectura* (read) or
+*Escritura* (write).
 
-| Permission                                        | `ADMIN` (Administrador del sistema) | `ADMINISTRATIVE_COORDINATION` (Coordinación administrativa) | `ACADEMIC_COORDINATION` (Coordinación académica) | `ADMINISTRATIVE_ASSISTANT` (Asistente administrativo) | `PSYCHOLOGY` (Psicología) | `INTERNSHIP_COORDINATION` (Coordinación de prácticas) |
-| ------------------------------------------------- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `inventory.view` — inventory and history          |   ✓   |   ✓   |   ✓   |   ✓   |       |       |
-| `inventory.loan` — hand out / receive items       |   ✓   |   ✓   |       |   ✓   |       |       |
-| `inventory.items.manage` — create and edit items  |   ✓   |   ✓   |       |   ✓   |       |       |
-| `inventory.people.view` — view people             |   ✓   |   ✓   |   ✓   |   ✓   |       |       |
-| `inventory.people.manage` — create / edit people  |   ✓   |   ✓   |       |   ✓   |       |       |
-| `inventory.people.viewDocument` — full document   |   ✓   |   ✓   |       |       |       |       |
-| `inventory.reports` — export reports (CSV)        |   ✓   |   ✓   |   ✓   |       |       |       |
-| `teachers.view` — teachers                        |   ✓   |   ✓   |   ✓   |       |       |   ✓   |
-| `teachers.manage` — create / edit teachers        |   ✓   |       |   ✓   |       |       |       |
-| `modules.manage` — academic modules               |   ✓   |       |   ✓   |       |       |       |
-| `schedule.view` — academic schedule               |   ✓   |   ✓   |   ✓   |   ✓   |       |   ✓   |
-| `schedule.manage` — any schedule entry            |   ✓   |       |   ✓   |       |       |       |
-| `schedule.fieldTrips` — field trips / internships |   ✓   |       |       |       |       |   ✓   |
-| `schedule.own` — *Mi agenda* (linked account)     |   ✓   |       |       |       |   ✓   |   ✓   |
-| `psychology.view` — request status (no clinical data) | ✓ |   ✓   |   ✓   |   ✓   |   ✓   |       |
-| `psychology.request` — register a request         |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |       |
-| `psychology.attend` — attend appointments (clinical data) | |     |       |       |   ✓   |       |
-| `payroll.view` — hours and payroll                |   ✓   |   ✓   |   ✓   |       |       |       |
-| `payroll.manage` — review, rates, approve month   |   ✓   |       |   ✓   |       |       |       |
-| `payroll.pay` — record payments                   |   ✓   |   ✓   |       |       |       |       |
-| `audit.view` — audit log                          |   ✓   |   ✓   |       |       |       |       |
-| `users.view` — view users                         |   ✓   |   ✓   |       |       |       |       |
-| `users.manage` — manage users                     |   ✓   |       |       |       |       |       |
-| `projection.manage` — event projection            |   ✓   |       |       |       |       |       |
+Every permission belongs to one module and is either **read** (see data) or **write** (change
+data). A write permission always brings the read permission of its module (for example
+`inventory.loan` → `inventory.view`, `schedule.own` → `schedule.ownView`), so a role never
+changes what it cannot see. Every `GET` endpoint requires a read permission and every
+`POST`/`PUT`/`PATCH`/`DELETE` a write one; `tests/permissions.test.ts` checks every route in
+`src/app/api` (except `auth/`, `health/` and `public/`). Screens show a «no access» notice
+(`NoAccess`) without the read permission and hide the write controls without the write one.
+
+| Permission (level)                                                  | `ADMIN` (Administrador del sistema) | `ADMINISTRATIVE_COORDINATION` (Coordinación administrativa) | `ACADEMIC_COORDINATION` (Coordinación académica) | `ADMINISTRATIVE_ASSISTANT` (Asistente administrativo) | `PSYCHOLOGY` (Psicología) | `INTERNSHIP_COORDINATION` (Coordinación de prácticas) |
+| ------------------------------------------------------------------- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Usuarios y roles**                                                |       |       |       |       |       |       |
+| `users.view` (read) — view accounts                                 |   ✓   |   ✓   |       |       |       |       |
+| `users.manage` (write) — create, edit and deactivate accounts       |   ✓   |       |       |       |       |       |
+| **Auditoría**                                                       |       |       |       |       |       |       |
+| `audit.view` (read) — audit log                                     |   ✓   |   ✓   |       |       |       |       |
+| **Inventario**                                                      |       |       |       |       |       |       |
+| `inventory.view` (read) — items and history                         |   ✓   |   ✓   |   ✓   |   ✓   |       |       |
+| `inventory.people.view` (read) — view people                        |   ✓   |   ✓   |   ✓   |   ✓   |       |       |
+| `inventory.people.viewDocument` (read) — full document              |   ✓   |   ✓   |       |       |       |       |
+| `inventory.reports` (read) — export reports (CSV)                   |   ✓   |   ✓   |   ✓   |       |       |       |
+| `inventory.loan` (write) — hand out / receive items                 |   ✓   |   ✓   |       |   ✓   |       |       |
+| `inventory.items.manage` (write) — create and edit items            |   ✓   |   ✓   |       |   ✓   |       |       |
+| `inventory.people.manage` (write) — create / edit people            |   ✓   |   ✓   |       |   ✓   |       |       |
+| **Docentes**                                                        |       |       |       |       |       |       |
+| `teachers.view` (read) — view teachers                              |   ✓   |   ✓   |   ✓   |       |       |   ✓   |
+| `teachers.manage` (write) — create / edit teachers                  |   ✓   |       |   ✓   |       |       |       |
+| **Módulos académicos**                                              |       |       |       |       |       |       |
+| `modules.view` (read) — view academic modules                       |   ✓   |   ✓   |   ✓   |       |       |   ✓   |
+| `modules.manage` (write) — create / edit academic modules           |   ✓   |       |   ✓   |       |       |       |
+| **Agenda**                                                          |       |       |       |       |       |       |
+| `schedule.view` (read) — general academic schedule                  |   ✓   |   ✓   |   ✓   |   ✓   |       |   ✓   |
+| `schedule.ownView` (read) — *Mi agenda* (own entries)               |   ✓   |       |       |       |   ✓   |   ✓   |
+| `schedule.manage` (write) — any schedule entry                      |   ✓   |       |   ✓   |       |       |       |
+| `schedule.fieldTrips` (write) — field trips / internships           |   ✓   |       |       |       |       |   ✓   |
+| `schedule.own` (write) — record and close in *Mi agenda*            |   ✓   |       |       |       |   ✓   |   ✓   |
+| **Psicología**                                                      |       |       |       |       |       |       |
+| `psychology.view` (read) — request status (no clinical data)        |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |       |
+| `psychology.request` (write) — register a request                   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |       |
+| `psychology.attend` (write) — attend cases (clinical data)          |       |       |       |       |   ✓   |       |
+| **Horas y nómina**                                                  |       |       |       |       |       |       |
+| `payroll.view` (read) — hours and month status                      |   ✓   |   ✓   |   ✓   |       |       |       |
+| `payroll.manage` (write) — review, rates, approve month             |   ✓   |       |   ✓   |       |       |       |
+| `payroll.pay` (write) — record payments                             |   ✓   |   ✓   |       |       |       |       |
+| **Proyección**                                                      |       |       |       |       |       |       |
+| `projection.view` (read) — open the projection screen               |   ✓   |       |       |       |       |       |
+| `projection.manage` (write) — change the playlist                   |   ✓   |       |       |       |       |       |
 
 Psychology clinical data (reason, full contact details, feedback) is not visible even to the
 system administrator (`ADMIN` has every permission except `psychology.attend`). **Psicología**
@@ -195,12 +227,15 @@ count towards payroll, not-completed ones do.
 **Psychology.** An appointment can be requested in two ways: through the public link
 `/solicitar-cita` (students, teachers and permanent staff; it requires an institutional email
 and accepting the [data policy](/privacidad); the request only arrives once the link sent to
-that email is confirmed) or registered by staff from `/panel/psicologia`. At most 3 requests per
-document per month and, through the public link, one open request at a time. The public form
-answers **exactly the same whether or not a request was created** (monthly limit reached or a
-request already open): telling the visitor would reveal that someone is seeing Psychology, which
-is health data. The public link is also rate-limited by IP and by document. All psychologists
-see the inbox; one takes the case, agrees on a time with the person and schedules it (it goes
+that email is confirmed) or registered by staff from `/panel/psicologia`. Limit: 3 appointments
+per document per month, counting only appointments that **took place** (attended or referred)
+in the current calendar month, by the appointment's date; pending, scheduled, no-show and
+cancelled requests do not count, and a person may have more than one open request. When the
+limit is reached, staff get an error, but the public form answers **exactly the same as when a
+request is created**: telling the visitor would reveal that someone is seeing Psychology, which
+is health data. The public link is also rate-limited by IP and by document. Psychologists see a
+notice on a request when other open requests carry the same document (compared by its hash), to
+avoid duplicates. All psychologists see the inbox; one takes the case, agrees on a time with the person and schedules it (it goes
 into her schedule and the person is notified by email). After the appointment she records the
 feedback: attendance, reason, referral (EPS, crisis line…), follow-up and an encrypted
 observation that only she can see. Statuses: email not confirmed → unassigned → taken →
@@ -220,6 +255,13 @@ month; from then on that month's schedule can no longer be changed. Administrati
 records the payments. «Descargar reporte» (download report) gives the month's CSV with hours,
 amount, status and payment for each person.
 
+Reading payroll never writes (`src/lib/modules/payroll/service.ts`): the month is calculated in
+memory from the schedule on top of what is stored. Rows are only written by the actions
+(review steps, verify, approve, pay), each in one transaction that locks the month: verifying a
+person freezes their calculation, approving requires everyone verified, and from then on only
+the stored amounts count. A person's line is `GET /api/payroll/people/[id]?year=&month=` (the id
+is the person's) and their actions are `POST` to the same route.
+
 **Email.** `SMTP_URL`, `MAIL_FROM`, `MAIL_DOMAINS` and `APP_URL` in `.env` (see
 `.env.example`). Without `SMTP_URL`, in development emails are printed to the server console;
 in production the public link answers that it could not send the email.
@@ -230,8 +272,9 @@ and it is saved in the `projections` table (a single row). «Abrir pantalla de p
 projection screen) opens `/proyeccion` full screen, outside the panel: it plays the list in a
 loop, skips videos that YouTube does not allow to be embedded and every 20 s asks whether the
 list changed, so it can be changed from another computer. At the end of each loop it asks
-YouTube for the list again (newly added songs come in). It is the only route whose CSP allows
-YouTube (`next.config.ts`). If the session expires during the event, the music keeps playing; it
+YouTube for the list again (newly added songs come in). It is the only page whose CSP allows
+YouTube frames and thumbnails (`src/proxy.ts`). Opening the screen requires `projection.view`;
+changing the list, `projection.manage`. If the session expires during the event, the music keeps playing; it
 just stops picking up changes. The panel also downloads the themed logo as a PNG.
 
 **Responsive.** Tables (`@utility data-table`) stack on phones: each row is a card and cells
@@ -239,7 +282,13 @@ with `data-t="Etiqueta"` show their header. When adding a new column, give the c
 
 Rules: an item has at most one open loan; when handed out it becomes *Prestado* (`LOANED`) and
 when received *Disponible* (`AVAILABLE`), or *Mantenimiento* (`MAINTENANCE`) if returned
-damaged. Everything happens in a transaction.
+damaged. Everything happens in a transaction. Besides the check in the service, the database
+enforces the single open loan with a partial unique index (`loans_one_open_per_item`, in the
+init migration, since Prisma cannot express it in the schema).
+
+**Transactions.** In every module, writes that take several steps (check, then write) run in a
+single transaction, and status changes that depend on the current status answer 409 when
+someone else changed it first.
 
 ## Information security
 
@@ -254,22 +303,37 @@ Personal data is stored, so:
   5 failed attempts, plus a per-IP limit on login attempts. Login answers **identically** for an
   unknown, inactive or locked account and for a wrong password (bcrypt runs even for unknown
   users), so it does not reveal which usernames exist.
-- **Session**: signed JWT in an `httpOnly`, `sameSite=strict` cookie, `secure` in production,
-  lasting 8 h. Changing the password invalidates the other sessions; a password reset, a role
-  change or deactivating the account invalidates all of them (`User.sessionVersion`).
-- **Server-side permissions**: every endpoint goes through `withPermission(...)`. What the
-  client hides is only a convenience.
-- **Validation** of every input with Zod.
+- **Sessions** are stored server-side in the `sessions` table; the cookie (`httpOnly`,
+  `sameSite=strict`, `secure` in production, named `__Host-admin_funca_session` in production)
+  only carries a signed reference to the row. A session ends after 8 h (absolute) or 2 h
+  without activity. Logging out revokes it in the database, not just in the browser, and the
+  other open tabs of the panel go back to the login too (`BroadcastChannel` in
+  `src/components/core/useSession.ts`). Changing the password revokes the user's other
+  sessions; a password reset, a role change or deactivating the account revokes all of them.
+  In *Mi cuenta* (`/panel/cuenta`) each user sees their open sessions (device, IP, last
+  activity) and can close one or all the others (`/api/auth/sessions`).
+- **Server-side permissions**: every endpoint goes through `withPermission(...)` (read
+  permission for `GET`, write permission for changes). What the client hides is only a
+  convenience.
+- **Validation** of every input with Zod (in jitless mode, `src/lib/core/zodConfig.ts`, so it
+  never needs `eval`).
 - **Audit** of logins (failed ones too), people lookups, hand-outs, returns and account
   changes, with IP. Write-only; it is not edited or deleted. The IP comes from the `X-Real-IP`
   header set by nginx (see deployment).
-- Security **headers** (CSP, `X-Frame-Options: DENY`, etc.) in `next.config.ts`;
-  `robots: noindex`.
+- **Content Security Policy** with a new nonce on every request (`src/proxy.ts`): only scripts
+  carrying the nonce run (`'strict-dynamic'`, no `'unsafe-inline'` for scripts, no `eval` in
+  production), and nothing can be framed or embedded except YouTube on `/proyeccion`. Because the
+  nonce is per request, pages are rendered on demand (`connection()` in `src/app/layout.tsx`),
+  not prerendered. API routes get `default-src 'none'` and `Cache-Control: no-store`
+  (`next.config.ts`), so responses with personal data are not cached.
+- Other security **headers** (`X-Frame-Options: DENY`, `nosniff`, HSTS in production, etc.) in
+  `next.config.ts`; `robots: noindex`.
 - `.env` is never committed to the repository. **If `DATA_KEY` is lost, the encrypted data
-  cannot be recovered**: keep it in a secrets manager and back up the database.
+  cannot be recovered**: keep it in a secrets manager and back up the database (see backups).
 
-Pending for production (see below): mandatory HTTPS on the VPS nginx, encrypted Postgres
-backups and an audit log retention policy.
+Pending for production (see below): mandatory HTTPS on the VPS nginx, encrypting the backups
+(today the dumps are plain files with the already-encrypted columns) and an audit log retention
+policy.
 
 ## Deployment on the VPS (Docker + nginx)
 
@@ -278,9 +342,22 @@ Same setup as the other projects: the app runs in a container that only listens 
 
 ```bash
 cp .env.example .env && nano .env     # POSTGRES_PASSWORD, AUTH_SECRET, DATA_KEY (required), APP_URL, SMTP_URL…
-docker compose up -d --build          # migrations are applied on container start (docker-entrypoint.sh)
-docker compose run --rm -e SEED_ADMIN_PASSWORD='a-strong-password' app node_modules/.bin/tsx prisma/seed.ts   # first time only
+docker compose up -d --build          # db → migrate (applies migrations and exits) → app; plus backup
+docker compose run --rm -e SEED_ADMIN_PASSWORD='a-strong-password' migrate node_modules/.bin/tsx prisma/seed.ts   # first time only
 ```
+
+The `Dockerfile` builds two images (targets):
+
+- **`runner`**: the web app, Next.js standalone output (`output: "standalone"`): only the files
+  the server uses, no build tools and no Prisma CLI. It runs `node server.js` and has a
+  `HEALTHCHECK` on `/api/health` (checks the database, returns no data).
+- **`migrator`**: Prisma CLI and the seed. By default it runs `prisma migrate deploy`; the seed
+  is run on demand with `node_modules/.bin/tsx prisma/seed.ts` (command above).
+
+`docker-compose.yml` has four services: `db` (Postgres 16, only on `127.0.0.1:5434`),
+`migrate` (one-off job from the `migrator` image; `app` waits until it finishes successfully),
+`app` (the `runner` image) and `backup` (see below). Keeping migrations out of the app image
+also prepares the future split into a separate back end and front end.
 
 `docker compose` refuses to start if `POSTGRES_PASSWORD`, `AUTH_SECRET` or `DATA_KEY` are
 missing, and the app refuses to run in production with an `AUTH_SECRET` or `DATA_KEY` shorter
@@ -290,16 +367,33 @@ the other users are created from *Usuarios y roles*.
 
 The `app` container runs as a non-root user (`nextjs`) with a read-only filesystem (only
 `/tmp` and `.next/cache` are writable tmpfs), `cap_drop: ALL` and `no-new-privileges`, and with
-`TZ=America/Bogota`. It must sit behind nginx, and nginx must set `X-Real-IP` (for example
+`TZ=America/Bogota`; `migrate` also runs as a non-root user with a read-only filesystem. It must sit behind nginx, and nginx must set `X-Real-IP` (for example
 `proxy_set_header X-Real-IP $remote_addr;`): the app trusts that header for the IPs in the
 audit log and for rate limits.
 
-Update: `git pull && docker compose up -d --build`. Logs: `docker compose logs -f app`.
+Update: `git pull && docker compose up -d --build` (new migrations are applied by `migrate`
+before the new `app` starts). Logs: `docker compose logs -f app` (`migrate` for migrations).
+
+## Backups
+
+- **Automatic**: the `backup` service runs `scripts/backup-loop.sh`: one `pg_dump -Fc`
+  (compressed custom format) when it starts and then every day at `BACKUP_HOUR` (default `02`,
+  Bogotá time) into `./backups/admin_funca-YYYYMMDD-HHMMSS.dump`, deleting dumps older than
+  `BACKUP_KEEP_DAYS` (default 30). Both are set in `.env`.
+- **Manual**: `./scripts/backup.sh` (from the project root on the server) writes a dump in the
+  same folder right away.
+- **Restore**: `docker compose stop app`, then `./scripts/restore.sh backups/<file>.dump`. It
+  asks you to type `restore` to confirm and **replaces** the data of the current database with
+  the dump. Then `docker compose start app`.
+
+`backups/` is git-ignored (the dumps contain personal data). Copy `./backups` off the server
+regularly: a backup on the same disk does not survive losing the disk. Documents and phones in
+a dump can only be read with `DATA_KEY`, so keep the key safe too, but not next to the dumps.
 
 ## Suggested next steps
 
 - Printing barcode labels (Code 128) for items and ID cards from the platform.
 - More modules per role: academic coordination (timetables, teachers), administrative
   coordination (cash desk, suppliers).
-- Automatic Postgres backups and `DATA_KEY` rotation (re-encryption).
+- Encrypted, off-server copies of the backups and `DATA_KEY` rotation (re-encryption).
 - Notifications for overdue loans.
