@@ -6,7 +6,7 @@ import { Alert, PageHeader, CopyButton, Modal, Empty, formatDate } from "@/compo
 import RequestForm, { requestBody } from "@/components/psychology/RequestForm";
 import RequestDetail, { RequestPill, appointmentText } from "@/components/psychology/RequestDetail";
 import type { PublicRequest } from "@/lib/modules/psychology/service";
-import { REQUEST_STATUS, REQUEST_STATUSES, REQUESTER_TYPE_NAME, ORIGIN_NAME, type RequestStatus } from "@/lib/modules/psychology/schemas";
+import { REQUEST_STATUS, REQUEST_STATUSES, REQUESTER_TYPE_NAME, ORIGIN_NAME, OPEN_STATUSES, type RequestStatus } from "@/lib/modules/psychology/schemas";
 
 type Summary = { count: Partial<Record<RequestStatus, number>>; mine: number; withoutFeedback: number };
 type Tab = "inbox" | "mine" | "ongoing" | "all";
@@ -177,6 +177,11 @@ export default function PsychologyPage() {
                     <td data-t="Estado">
                       <RequestPill status={r.status} />
                       {withoutFeedback && r.isMine && <span className="ml-1 pill bg-red-100 text-red-700">falta retro</span>}
+                      {OPEN_STATUSES.includes(r.status) && !!r.detail?.otherOpenRequests.length && (
+                        <span className="ml-1 pill bg-gold-100 text-gold-700" title={`Hay otra solicitud abierta con este documento (${r.detail.otherOpenRequests.map((n) => `#${n}`).join(", ")})`}>
+                          documento repetido
+                        </span>
+                      )}
                     </td>
                     <td data-t="Psicóloga" className="text-slate-600">
                       {r.assignedTo?.name ?? "—"}

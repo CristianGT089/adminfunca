@@ -1,4 +1,5 @@
 import { z } from "zod";
+import "@/lib/core/zodConfig";
 import { parseLinks } from "./youtube";
 
 export const projectionSchema = z.object({

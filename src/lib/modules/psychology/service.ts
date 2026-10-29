@@ -12,10 +12,11 @@ import { encrypt, decrypt, mask, searchHash, normalizeCode } from "@/lib/core/cr
 import { BusinessError } from "@/lib/core/http";
 import { hasPermission } from "@/lib/core/permissions";
 import { isInstitutionalEmail, sendMail } from "@/lib/core/mail";
-import { ensureMonthEditable, hoursBetween } from "@/lib/modules/schedule/service";
+import { ensureMonthEditable, hoursBetween, type Db } from "@/lib/modules/schedule/service";
 import { MODALITY_NAME } from "@/lib/modules/schedule/schemas";
 import {
   countsTowardLimit,
+  HELD_STATUSES,
   statusAfterFeedback,
   OPEN_STATUSES,
   MONTHLY_LIMIT,
@@ -41,7 +42,11 @@ type RequestDb = ConsultationRequest & {
 
 const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
 
-export function toPublicRequest(r: RequestDb, user: Pick<User, "id" | "role">) {
+/**
+ * @param otherOpen numbers of other open requests with the same document (only shown to the
+ *   psychologist, as a hint: on the public link anyone can type someone else's document).
+ */
+export function toPublicRequest(r: RequestDb, user: Pick<User, "id" | "role">, otherOpen: number[] = []) {
   const professional = hasPermission(user.role, "psychology.attend");
   const isOwn = r.assignedToId === user.id;
   const base = {
@@ -76,6 +81,7 @@ export function toPublicRequest(r: RequestDb, user: Pick<User, "id" | "role">) {
       availability: r.availability,
       reason: decrypt(r.reasonEncrypted),
       previousId: r.previousId,
+      otherOpenRequests: otherOpen,
       feedback: r.attendance
         ? {
             attendance: r.attendance,
@@ -92,17 +98,39 @@ export function toPublicRequest(r: RequestDb, user: Pick<User, "id" | "role">) {
 }
 export type PublicRequest = ReturnType<typeof toPublicRequest>;
 
-/** Requests for that document in the current calendar month that count towards the limit. */
-async function requestsThisMonth(documentHash: string, now = new Date()) {
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const list = await prisma.consultationRequest.findMany({ where: { documentHash, createdAt: { gte: monthStart } }, select: { status: true, tokenExpiresAt: true } });
-  return list.filter((r) => countsTowardLimit({ status: r.status as RequestStatus, tokenExpiresAt: r.tokenExpiresAt }, now)).length;
+/**
+ * Maps the requests for the screen. For the psychologist it adds, per request, the numbers of
+ * other open requests with the same document (looked up by its hash, which never leaves the server).
+ */
+export async function publicRequests(list: RequestDb[], user: Pick<User, "id" | "role">) {
+  if (!hasPermission(user.role, "psychology.attend") || list.length === 0) return list.map((r) => toPublicRequest(r, user));
+  const open = await prisma.consultationRequest.findMany({
+    // Unconfirmed public requests are not in the inbox yet: they don't count as duplicates.
+    where: { documentHash: { in: [...new Set(list.map((r) => r.documentHash))] }, status: { in: OPEN_STATUSES.filter((st) => st !== "PENDING_VERIFICATION") } },
+    select: { id: true, number: true, documentHash: true },
+    orderBy: { number: "asc" },
+  });
+  return list.map((r) =>
+    toPublicRequest(
+      r,
+      user,
+      open.filter((o) => o.documentHash === r.documentHash && o.id !== r.id).map((o) => o.number)
+    )
+  );
+}
+
+/** Appointments of that document that took place in the current calendar month (the limit counts these). */
+async function heldThisMonth(documentHash: string, now = new Date()) {
+  const list = await prisma.consultationRequest.findMany({
+    where: { documentHash, status: { in: HELD_STATUSES }, event: { startsAt: { gte: new Date(now.getFullYear(), now.getMonth(), 1), lt: new Date(now.getFullYear(), now.getMonth() + 1, 1) } } },
+    select: { status: true, event: { select: { startsAt: true } } },
+  });
+  return list.filter((r) => countsTowardLimit({ status: r.status as RequestStatus, appointmentAt: r.event?.startsAt ?? null }, now)).length;
 }
 
 /**
- * Creates a request. Through the public link it requires an institutional email, a single open
- * request per document, and it waits for email confirmation. In every case the monthly request
- * limit applies.
+ * Creates a request. Through the public link it requires an institutional email and it waits for
+ * email confirmation. In every case the monthly limit of appointments that took place applies.
  */
 export async function createRequest(data: RequestInput, options: { origin: "PUBLIC" | "INTERNAL"; registeredById?: string }) {
   const document = normalizeCode(data.document);
@@ -110,16 +138,12 @@ export async function createRequest(data: RequestInput, options: { origin: "PUBL
   const isPublic = options.origin === "PUBLIC";
 
   if (isPublic && !isInstitutionalEmail(data.email)) throw new BusinessError("Use su correo institucional de FUNCA: allí le llegará el enlace para confirmar la solicitud");
-  const overLimit = (await requestsThisMonth(documentHash)) >= MONTHLY_LIMIT;
-  if (isPublic) {
+  const overLimit = (await heldThisMonth(documentHash)) >= MONTHLY_LIMIT;
+  if (overLimit) {
     // On the public link a refusal must look like a success: telling the visitor that a
-    // document already has requests would reveal that someone is seeing Psychology.
-    const open = await prisma.consultationRequest.findFirst({
-      where: { documentHash, status: { in: OPEN_STATUSES }, OR: [{ status: { not: "PENDING_VERIFICATION" } }, { tokenExpiresAt: { gt: new Date() } }] },
-    });
-    if (overLimit || open) return { request: null, token: null, blocked: overLimit ? ("monthlyLimit" as const) : ("openRequest" as const) };
-  } else if (overLimit) {
-    throw new BusinessError(`Este documento ya tiene ${MONTHLY_LIMIT} solicitudes este mes, que es el máximo permitido`, 429);
+    // document already has appointments would reveal that someone is seeing Psychology.
+    if (isPublic) return { request: null, token: null, blocked: "monthlyLimit" as const };
+    throw new BusinessError(`Este documento ya tuvo ${MONTHLY_LIMIT} citas realizadas este mes, que es el máximo permitido`, 429);
   }
 
   const person = await prisma.person.findUnique({ where: { documentHash }, select: { id: true } });
@@ -177,7 +201,13 @@ export async function confirmEmail(token: string) {
   const r = await prisma.consultationRequest.findUnique({ where: { tokenHash: hashToken(token) } });
   if (!r || r.status !== "PENDING_VERIFICATION") throw new BusinessError("El enlace no es válido o ya se usó", 404);
   if (!r.tokenExpiresAt || r.tokenExpiresAt < new Date()) throw new BusinessError("El enlace venció. Haga la solicitud de nuevo", 410);
-  return prisma.consultationRequest.update({ where: { id: r.id }, data: { status: "PENDING", emailVerifiedAt: new Date(), tokenHash: null, tokenExpiresAt: null } });
+  // Conditional: if it was cancelled or confirmed in the meantime, nothing changes.
+  const res = await prisma.consultationRequest.updateMany({
+    where: { id: r.id, status: "PENDING_VERIFICATION", tokenExpiresAt: { gt: new Date() } },
+    data: { status: "PENDING", emailVerifiedAt: new Date(), tokenHash: null, tokenExpiresAt: null },
+  });
+  if (res.count === 0) throw new BusinessError("El enlace no es válido o ya se usó", 404);
+  return prisma.consultationRequest.findUniqueOrThrow({ where: { id: r.id } });
 }
 
 export async function listRequests(filter: { status?: RequestStatus; assignedToId?: string; q?: string; open?: boolean; month?: { year: number; month: number } }) {
@@ -203,10 +233,22 @@ export async function getRequest(id: string) {
   return prisma.consultationRequest.findUnique({ where: { id }, include });
 }
 
-async function requestOrError(id: string) {
-  const r = await getRequest(id);
+async function requestOrError(id: string, db: Db = prisma) {
+  const r = await db.consultationRequest.findUnique({ where: { id }, include });
   if (!r) throw new BusinessError("Solicitud no encontrada", 404);
   return r;
+}
+
+const changedMeanwhile = () => new BusinessError("La solicitud cambió mientras tanto; recargue e intente de nuevo", 409);
+
+/**
+ * Conditional write that guards a multi-step change: it only applies if the request is still as
+ * it was read (same status, same psychologist, same appointment). It takes the row lock, so
+ * concurrent actions on the same request wait for this transaction.
+ */
+async function claim(tx: Prisma.TransactionClient, r: RequestDb, data: Prisma.ConsultationRequestUpdateManyMutationInput) {
+  const res = await tx.consultationRequest.updateMany({ where: { id: r.id, status: r.status, assignedToId: r.assignedToId, eventId: r.eventId }, data });
+  if (res.count === 0) throw changedMeanwhile();
 }
 
 /**
@@ -231,48 +273,55 @@ export async function releaseRequest(id: string, user: User) {
   const r = await requestOrError(id);
   ensureAssigned(r, user);
   if (r.status !== "TAKEN") throw new BusinessError("Solo se puede devolver un caso que aún no tiene cita");
-  return prisma.consultationRequest.update({ where: { id }, data: { status: "PENDING", assignedToId: null, takenAt: null }, include });
+  const res = await prisma.consultationRequest.updateMany({ where: { id, status: "TAKEN", assignedToId: user.id }, data: { status: "PENDING", assignedToId: null, takenAt: null } });
+  if (res.count === 0) throw changedMeanwhile();
+  return requestOrError(id);
 }
 
 /** Sets the appointment time agreed with the person: creates or moves the schedule entry. */
 export async function scheduleRequest(id: string, data: ScheduleInput, user: User) {
-  let r = await requestOrError(id);
-  if (r.status === "PENDING") r = await takeRequest(id, user);
-  ensureAssigned(r, user);
-  if (r.status !== "TAKEN" && r.status !== "SCHEDULED") throw new BusinessError("Esta solicitud ya está cerrada");
-  if (!user.personId) throw new BusinessError("Su cuenta no está vinculada a una persona; pida al administrador que la vincule para poder programar citas", 409);
+  const first = await requestOrError(id);
+  if (first.status === "PENDING") await takeRequest(id, user);
 
   const startsAt = new Date(data.startsAt);
   const endsAt = new Date(data.endsAt);
-  await ensureMonthEditable(startsAt, ...(r.event ? [r.event.startsAt] : []));
-  const clash = await prisma.event.findFirst({
-    where: {
-      teacherId: user.personId,
-      startsAt: { lt: endsAt },
-      endsAt: { gt: startsAt },
-      ...(r.eventId ? { id: { not: r.eventId } } : {}),
-      OR: [{ completion: null }, { completion: { not: "CANCELLED" } }],
-    },
-    select: { title: true, startsAt: true },
-  });
-  if (clash) throw new BusinessError(`Ya tiene "${clash.title}" a esa hora (${clash.startsAt.toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" })})`, 409);
+  const { r, updated } = await prisma.$transaction(async (tx) => {
+    const r = await requestOrError(id, tx);
+    ensureAssigned(r, user);
+    if (r.status !== "TAKEN" && r.status !== "SCHEDULED") throw new BusinessError("Esta solicitud ya está cerrada");
+    if (!user.personId) throw new BusinessError("Su cuenta no está vinculada a una persona; pida al administrador que la vincule para poder programar citas", 409);
+    const personId = user.personId;
+    // Locks the request row until the end: a concurrent cancel or reschedule waits and then fails.
+    await claim(tx, r, { status: "SCHEDULED" });
+    await ensureMonthEditable([startsAt, ...(r.event ? [r.event.startsAt] : [])], tx);
+    const clash = await tx.event.findFirst({
+      where: {
+        teacherId: personId,
+        startsAt: { lt: endsAt },
+        endsAt: { gt: startsAt },
+        ...(r.eventId ? { id: { not: r.eventId } } : {}),
+        OR: [{ completion: null }, { completion: { not: "CANCELLED" } }],
+      },
+      select: { title: true, startsAt: true },
+    });
+    if (clash) throw new BusinessError(`Ya tiene "${clash.title}" a esa hora (${clash.startsAt.toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" })})`, 409);
 
-  const fields = {
-    type: "PSYCHOLOGY_SESSION" as const,
-    // Without the name: more people see the schedule than the case.
-    title: `Consulta psicológica #${r.number}`,
-    startsAt,
-    endsAt,
-    hours: hoursBetween(startsAt, endsAt),
-    modality: data.modality,
-    campus: data.campus,
-    location: data.location,
-    teacherId: user.personId,
-    payable: true,
-  };
-  const updated = await prisma.$transaction(async (tx) => {
+    const fields = {
+      type: "PSYCHOLOGY_SESSION" as const,
+      // Without the name: more people see the schedule than the case.
+      title: `Consulta psicológica #${r.number}`,
+      startsAt,
+      endsAt,
+      hours: hoursBetween(startsAt, endsAt),
+      modality: data.modality,
+      campus: data.campus,
+      location: data.location,
+      teacherId: personId,
+      payable: true,
+    };
     const event = r.eventId ? await tx.event.update({ where: { id: r.eventId }, data: fields }) : await tx.event.create({ data: { ...fields, createdById: user.id } });
-    return tx.consultationRequest.update({ where: { id }, data: { status: "SCHEDULED", eventId: event.id }, include });
+    const updated = await tx.consultationRequest.update({ where: { id }, data: { status: "SCHEDULED", eventId: event.id }, include });
+    return { r, updated };
   });
 
   if (data.notify) {
@@ -306,15 +355,16 @@ export async function scheduleRequest(id: string, data: ScheduleInput, user: Use
 
 /** Feedback after the appointment time. It can be corrected while the month is not approved. */
 export async function recordFeedback(id: string, data: FeedbackInput, user: User) {
-  const r = await requestOrError(id);
-  ensureAssigned(r, user);
-  if (!r.event) throw new BusinessError("La solicitud aún no tiene cita programada");
-  if (r.event.startsAt > new Date()) throw new BusinessError("La retroalimentación se registra después de la hora de inicio de la cita");
-  await ensureMonthEditable(r.event.startsAt);
   const status = statusAfterFeedback(data);
   return prisma.$transaction(async (tx) => {
+    const r = await requestOrError(id, tx);
+    ensureAssigned(r, user);
+    if (!r.event) throw new BusinessError("La solicitud aún no tiene cita programada");
+    if (r.event.startsAt > new Date()) throw new BusinessError("La retroalimentación se registra después de la hora de inicio de la cita");
+    await claim(tx, r, { status });
+    await ensureMonthEditable([r.event.startsAt], tx);
     await tx.event.update({
-      where: { id: r.event!.id },
+      where: { id: r.event.id },
       // No-shows and late cancellations also count as hours: the time was reserved.
       data: { completion: data.attendance === "ATTENDED" ? "COMPLETED" : "NOT_COMPLETED", closedAt: new Date(), closedById: user.id, closingNote: null },
     });
@@ -340,18 +390,19 @@ export async function recordFeedback(id: string, data: FeedbackInput, user: User
  * only the ones nobody has taken. If the appointment was in the future it is removed from the schedule.
  */
 export async function cancelRequest(id: string, reason: string, user: User) {
-  const r = await requestOrError(id);
-  if (!OPEN_STATUSES.includes(r.status as RequestStatus)) throw new BusinessError("La solicitud ya está cerrada");
-  const professional = hasPermission(user.role, "psychology.attend");
-  if (!professional && r.status !== "PENDING" && r.status !== "PENDING_VERIFICATION") throw new BusinessError("La solicitud ya la tomó una psicóloga; pídale a ella que la cancele", 403);
-  if (professional && r.assignedToId && r.assignedToId !== user.id) throw new BusinessError(`Este caso lo lleva ${r.assignedTo?.name}`, 403);
   return prisma.$transaction(async (tx) => {
+    const r = await requestOrError(id, tx);
+    if (!OPEN_STATUSES.includes(r.status as RequestStatus)) throw new BusinessError("La solicitud ya está cerrada");
+    const professional = hasPermission(user.role, "psychology.attend");
+    if (!professional && r.status !== "PENDING" && r.status !== "PENDING_VERIFICATION") throw new BusinessError("La solicitud ya la tomó una psicóloga; pídale a ella que la cancele", 403);
+    if (professional && r.assignedToId && r.assignedToId !== user.id) throw new BusinessError(`Este caso lo lleva ${r.assignedTo?.name}`, 403);
+    await claim(tx, r, { status: "CANCELLED", cancellationReason: reason, closedAt: new Date(), tokenHash: null });
     if (r.event) {
-      await ensureMonthEditable(r.event.startsAt);
+      await ensureMonthEditable([r.event.startsAt], tx);
       if (r.event.startsAt > new Date()) await tx.event.delete({ where: { id: r.event.id } });
       else await tx.event.update({ where: { id: r.event.id }, data: { completion: "CANCELLED", closedAt: new Date(), closedById: user.id } });
     }
-    return tx.consultationRequest.update({ where: { id }, data: { status: "CANCELLED", cancellationReason: reason, closedAt: new Date(), tokenHash: null }, include });
+    return requestOrError(id, tx);
   });
 }
 

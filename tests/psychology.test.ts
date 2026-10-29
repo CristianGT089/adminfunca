@@ -17,12 +17,23 @@ test("if the person attended, the feedback requires the reason", () => {
   assert.equal(feedbackSchema.safeParse({ attendance: "NO_SHOW" }).success, true);
 });
 
-test("monthly limit: cancelled requests and expired links do not count", () => {
+test("monthly limit: only appointments that took place this month count", () => {
   const now = new Date("2026-10-15T12:00:00");
-  assert.equal(countsTowardLimit({ status: "ATTENDED", tokenExpiresAt: null }, now), true);
-  assert.equal(countsTowardLimit({ status: "CANCELLED", tokenExpiresAt: null }, now), false);
-  assert.equal(countsTowardLimit({ status: "PENDING_VERIFICATION", tokenExpiresAt: new Date("2026-10-16T00:00:00") }, now), true);
-  assert.equal(countsTowardLimit({ status: "PENDING_VERIFICATION", tokenExpiresAt: new Date("2026-10-14T00:00:00") }, now), false);
+  const thisMonth = new Date("2026-10-02T09:00:00");
+  assert.equal(countsTowardLimit({ status: "ATTENDED", appointmentAt: thisMonth }, now), true);
+  assert.equal(countsTowardLimit({ status: "REFERRED", appointmentAt: thisMonth }, now), true);
+  for (const status of ["PENDING_VERIFICATION", "PENDING", "TAKEN", "SCHEDULED", "NO_SHOW", "CANCELLED"] as const) {
+    assert.equal(countsTowardLimit({ status, appointmentAt: thisMonth }, now), false, status);
+  }
+});
+
+test("monthly limit: the appointment date decides the month, not the request date", () => {
+  const now = new Date("2026-10-15T12:00:00");
+  assert.equal(countsTowardLimit({ status: "ATTENDED", appointmentAt: new Date("2026-09-30T16:00:00") }, now), false);
+  assert.equal(countsTowardLimit({ status: "ATTENDED", appointmentAt: new Date("2026-11-01T08:00:00") }, now), false);
+  assert.equal(countsTowardLimit({ status: "ATTENDED", appointmentAt: new Date("2025-10-10T08:00:00") }, now), false);
+  assert.equal(countsTowardLimit({ status: "ATTENDED", appointmentAt: null }, now), false);
+  assert.equal(countsTowardLimit({ status: "ATTENDED", appointmentAt: new Date("2026-10-31T23:00:00") }, now), true);
 });
 
 test("the request requires accepting the data policy", () => {

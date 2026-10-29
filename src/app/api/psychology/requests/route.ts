@@ -3,7 +3,7 @@ import { withPermission, readBody, errorResponse } from "@/lib/core/http";
 import { audit } from "@/lib/core/audit";
 import { hasPermission } from "@/lib/core/permissions";
 import { REQUEST_STATUSES, requestSchema, type RequestStatus } from "@/lib/modules/psychology/schemas";
-import { countByStatus, createRequest, listRequests, toPublicRequest } from "@/lib/modules/psychology/service";
+import { countByStatus, createRequest, listRequests, publicRequests } from "@/lib/modules/psychology/service";
 
 export const GET = withPermission("psychology.view", async (req, user) => {
   const p = new URL(req.url).searchParams;
@@ -18,7 +18,7 @@ export const GET = withPermission("psychology.view", async (req, user) => {
     month: year && month ? { year, month } : undefined,
   });
   const professional = hasPermission(user.role, "psychology.attend");
-  return NextResponse.json({ requests: list.map((r) => toPublicRequest(r, user)), summary: await countByStatus(professional ? user.id : undefined) });
+  return NextResponse.json({ requests: await publicRequests(list, user), summary: await countByStatus(professional ? user.id : undefined) });
 });
 
 /** Request registered by the staff (assistant, coordinations, psychology). */
@@ -30,7 +30,8 @@ export const POST = withPermission("psychology.request", async (req, user) => {
     const { request } = await createRequest(data, { origin: "INTERNAL", registeredById: user.id });
     if (!request) throw new Error("Internal request unexpectedly blocked");
     await audit("psychology.request", { userId: user.id, entity: "ConsultationRequest", entityId: request.id, details: { number: request.number, origin: "INTERNAL" } });
-    return NextResponse.json({ request: toPublicRequest(request, user) }, { status: 201 });
+    const [publicRequest] = await publicRequests([request], user);
+    return NextResponse.json({ request: publicRequest }, { status: 201 });
   } catch (e) {
     return errorResponse(e);
   }

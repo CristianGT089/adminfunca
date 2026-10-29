@@ -131,6 +131,13 @@ function Content({ id, onChange }: { id: string; onChange: (m: string) => void }
         {mine && <span className="pill bg-gold-100 text-gold-700">Mi caso</span>}
       </div>
 
+      {open && d && d.otherOpenRequests.length > 0 && (
+        <Alert type="info">
+          {d.otherOpenRequests.length === 1 ? "Hay otra solicitud abierta" : "Hay otras solicitudes abiertas"} con este documento ({d.otherOpenRequests.map((n) => `#${n}`).join(", ")}). Revise
+          que se trate de la misma persona antes de programar.
+        </Alert>
+      )}
+
       <dl className="grid gap-2 text-sm">
         {rows.map(([k, v]) => (
           <div key={k} className="grid grid-cols-[7.5rem_1fr] gap-2">

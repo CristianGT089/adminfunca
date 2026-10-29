@@ -15,8 +15,8 @@ export default function RequestAppointment({ domains }: { domains: string[] }) {
           Si los datos son correctos, enviamos un enlace a <strong>{sent.email}</strong>. Ábralo y presione «Confirmar» para que su solicitud llegue a Psicología.
         </p>
         <p className="mt-2 text-sm text-slate-500">
-          El enlace vence en 24 horas. Si no lo ve, revise la carpeta de correo no deseado. Si ya tiene una solicitud en curso o alcanzó el máximo de solicitudes del
-          mes, no se envía un enlace nuevo: Psicología se comunicará con usted o puede acudir a la oficina de bienestar.
+          El enlace vence en 24 horas. Si no lo ve, revise la carpeta de correo no deseado. Si este mes ya tuvo el máximo de citas realizadas, no se envía un
+          enlace nuevo: puede acudir a la oficina de bienestar.
         </p>
       </div>
     );

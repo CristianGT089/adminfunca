@@ -3,7 +3,7 @@ import { withPermission, readBody, notFound, errorResponse, forbidden } from "@/
 import { audit } from "@/lib/core/audit";
 import { hasPermission, type Permission } from "@/lib/core/permissions";
 import { cancelSchema, scheduleSchema, feedbackSchema } from "@/lib/modules/psychology/schemas";
-import { cancelRequest, createFollowUp, releaseRequest, scheduleRequest, recordFeedback, toPublicRequest, takeRequest } from "@/lib/modules/psychology/service";
+import { cancelRequest, createFollowUp, releaseRequest, scheduleRequest, recordFeedback, publicRequests, takeRequest } from "@/lib/modules/psychology/service";
 
 type Ctx = { params: Promise<{ id: string; action: string }> };
 
@@ -59,7 +59,8 @@ export const POST = withPermission(["psychology.attend", "psychology.request"], 
         break;
     }
     await audit(`psychology.${action}`, { userId: user.id, entity: "ConsultationRequest", entityId: result!.id, details: { number: result!.number, status: result!.status, ...details } });
-    return NextResponse.json({ request: toPublicRequest(result!, user) });
+    const [request] = await publicRequests([result!], user);
+    return NextResponse.json({ request });
   } catch (e) {
     return errorResponse(e);
   }

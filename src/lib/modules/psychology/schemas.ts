@@ -3,13 +3,17 @@
  * can also be used in the screens.
  */
 import { z } from "zod";
+import "@/lib/core/zodConfig";
 import { MODALITIES } from "@/lib/modules/schedule/schemas";
 import { CAMPUSES, DOCUMENT_TYPES } from "@/lib/modules/inventory/schemas";
 
-/** Maximum requests per document in a calendar month. */
+/**
+ * Maximum appointments per document in a calendar month. Only appointments that actually took
+ * place count (see `countsTowardLimit`).
+ */
 export const MONTHLY_LIMIT = 3;
 /** Current version of the data processing policy (changes if the text changes). */
-export const POLICY_VERSION = "2026-10-15";
+export const POLICY_VERSION = "2026-10-28";
 /** Default length of an individual session, in minutes. */
 export const SESSION_MINUTES = 60;
 
@@ -116,12 +120,15 @@ export function statusAfterFeedback(d: Pick<FeedbackInput, "attendance" | "refer
   return d.referral !== "NONE" ? "REFERRED" : "ATTENDED";
 }
 
+/** Statuses of a request whose appointment actually took place. */
+export const HELD_STATUSES: RequestStatus[] = ["ATTENDED", "REFERRED"];
+
 /**
- * Does this request count towards the monthly limit? Cancelled ones do not; those waiting for
- * email confirmation only while their link is still valid.
+ * Does this request count towards the monthly limit of `now`'s month? An appointment only counts
+ * when it actually took place (attended or referred) and its date falls in that calendar month.
+ * Pending, unconfirmed, taken, scheduled, no-show and cancelled requests do not count.
  */
-export function countsTowardLimit(r: { status: RequestStatus; tokenExpiresAt: Date | null }, now = new Date()): boolean {
-  if (r.status === "CANCELLED") return false;
-  if (r.status === "PENDING_VERIFICATION") return !!r.tokenExpiresAt && r.tokenExpiresAt > now;
-  return true;
+export function countsTowardLimit(r: { status: RequestStatus; appointmentAt: Date | null }, now = new Date()): boolean {
+  if (!HELD_STATUSES.includes(r.status) || !r.appointmentAt) return false;
+  return r.appointmentAt.getFullYear() === now.getFullYear() && r.appointmentAt.getMonth() === now.getMonth();
 }

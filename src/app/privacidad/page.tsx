@@ -32,7 +32,7 @@ const SECTIONS: { title: string; paragraphs: string[] }[] = [
     title: "4. Para qué usamos sus datos",
     paragraphs: [
       "Para comunicarnos con usted, programar y prestar la atención psicológica, hacer seguimiento, remitirle a otra entidad cuando sea necesario y llevar las estadísticas generales del servicio (sin datos que le identifiquen).",
-      "También para controlar el número de solicitudes por persona y verificar, mediante el correo institucional, que quien solicita hace parte de la comunidad FUNCA.",
+      "También para controlar el número de citas realizadas por persona en el mes y verificar, mediante el correo institucional, que quien solicita hace parte de la comunidad FUNCA.",
     ],
   },
   {

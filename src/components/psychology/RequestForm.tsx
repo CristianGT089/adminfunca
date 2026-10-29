@@ -154,7 +154,7 @@ export default function RequestForm({
         </span>
       </label>
 
-      {isPublic && <p className="sm:col-span-2 text-xs text-slate-500">Cada persona puede pedir hasta {MONTHLY_LIMIT} citas al mes. La psicóloga se comunicará con usted para acordar el día y la hora.</p>}
+      {isPublic && <p className="sm:col-span-2 text-xs text-slate-500">Cada persona puede tener hasta {MONTHLY_LIMIT} citas realizadas al mes (las citas a las que no asiste no cuentan). La psicóloga se comunicará con usted para acordar el día y la hora.</p>}
 
       {error && (
         <div className="sm:col-span-2">
