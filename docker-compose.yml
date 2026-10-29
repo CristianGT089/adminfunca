@@ -16,12 +16,36 @@ services:
       timeout: 5s
       retries: 10
 
-  app:
-    build: .
-    restart: unless-stopped
+  # One-off job before the app: applies the Prisma migrations and exits. The first admin:
+  #   docker compose run --rm -e SEED_ADMIN_PASSWORD=... migrate node_modules/.bin/tsx prisma/seed.ts
+  migrate:
+    build:
+      context: .
+      target: migrator
+    restart: "no"
     depends_on:
       db:
         condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://admin_funca:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}@db:5432/admin_funca?schema=public
+      DATA_KEY: ${DATA_KEY:?Set DATA_KEY in your .env before deploying}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  app:
+    build:
+      context: .
+      target: runner
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: postgresql://admin_funca:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}@db:5432/admin_funca?schema=public
       AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in your .env before deploying}
@@ -30,7 +54,6 @@ services:
       SMTP_URL: ${SMTP_URL:-}
       MAIL_FROM: ${MAIL_FROM:-FUNCA Bienestar <no-responder@funca.edu.co>}
       MAIL_DOMAINS: ${MAIL_DOMAINS:-funca.edu.co}
-      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
     ports:
       - "127.0.0.1:${APP_PORT:-3020}:3000"
     read_only: true
@@ -41,6 +64,26 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+
+  # Daily pg_dump into ./backups (kept BACKUP_KEEP_DAYS days). Copy that folder off the server
+  # too: a backup on the same disk does not survive losing the disk.
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}
+      POSTGRES_USER: admin_funca
+      POSTGRES_DB: admin_funca
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-30}
+      BACKUP_HOUR: ${BACKUP_HOUR:-02}
+      TZ: America/Bogota
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup-loop.sh:/backup-loop.sh:ro
+    entrypoint: ["sh", "/backup-loop.sh"]
 
 volumes:
   admin_funca_pgdata:

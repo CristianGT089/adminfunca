@@ -19,3 +19,6 @@ docker-compose.override.yml
 /c[0-9a-z]
 *.cookies
 cookies*.txt
+
+# Database dumps (personal data: never in the repository or the image)
+/backups/
